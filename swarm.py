@@ -162,6 +162,7 @@ async def claude(
     session_id: str | None = None,
     timeout: float = TIMEOUT_SECONDS,
     tools: bool = False,
+    tools_rw: bool = False,
     cwd: str | None = None,
 ) -> dict:
     """Run a Claude Code agent. Returns {content, session_id, cost, elapsed, error}."""
@@ -170,9 +171,12 @@ async def claude(
         cmd += ["--append-system-prompt", system]
     if session_id:
         cmd += ["--resume", session_id]
-    if tools:
-        cmd += ["--permission-mode", "acceptEdits",
-                "--allowed-tools", "Read,Glob,Grep,Bash"]
+    if tools or tools_rw:
+        cmd += ["--permission-mode", "acceptEdits"]
+        if tools_rw:
+            cmd += ["--allowed-tools", "Read,Glob,Grep,Bash,Edit,Write"]
+        else:
+            cmd += ["--allowed-tools", "Read,Glob,Grep,Bash"]
 
     t0 = time.monotonic()
     try:
@@ -277,6 +281,7 @@ async def vote_step(
     context: str,
     verbose: bool = False,
     tools: bool = False,
+    tools_rw: bool = False,
     cwd: str | None = None,
 ) -> dict:
     """Adaptive first-to-ahead-by-K voting for a single step.
@@ -307,7 +312,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
         for i in range(batch_count):
             role = ROLES[(total_sampled + i) % len(ROLES)]
             tasks.append(claude(step_prompt, model=MODELS["worker"], system=role,
-                               tools=tools, cwd=cwd))
+                               tools=tools, tools_rw=tools_rw, cwd=cwd))
 
         results = await asyncio.gather(*tasks)
         total_sampled += batch_count
@@ -473,7 +478,7 @@ LEARNING: [category] <any reusable insight from this evaluation>"""
 
 async def run(task: str, tags: list[str] | None = None,
               verbose: bool = False, mode: str = "maker",
-              tools: bool = False, cwd: str | None = None, workers: int = 3) -> str:
+              tools: bool = False, tools_rw: bool = False, cwd: str | None = None, workers: int = 3) -> str:
     """Main entry point.
 
     mode="maker": decompose → vote per step → compose → verify → learn → loop
@@ -481,7 +486,7 @@ async def run(task: str, tags: list[str] | None = None,
     """
     if mode == "opinion":
         return await _run_opinion(task, tags=tags, num_workers=workers, verbose=verbose,
-                                  tools=tools, cwd=cwd)
+                                  tools=tools, tools_rw=tools_rw, cwd=cwd)
 
     t0 = time.monotonic()
     total_cost = 0
@@ -525,7 +530,7 @@ async def run(task: str, tags: list[str] | None = None,
                 context += f"\n\nPrior step results:\n{prior}"
 
             result = await vote_step(step, i + 1, len(steps), context,
-                                    verbose=verbose, tools=tools, cwd=cwd)
+                                    verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd)
             step_results.append(result)
 
             # Save best session for resume
@@ -586,7 +591,7 @@ async def run(task: str, tags: list[str] | None = None,
 
 async def _run_opinion(task: str, tags: list[str] | None = None,
                        num_workers: int = 3, verbose: bool = False,
-                       tools: bool = False, cwd: str | None = None) -> str:
+                       tools: bool = False, tools_rw: bool = False, cwd: str | None = None) -> str:
     """v1 mode: parallel diverse opinions + consensus/judge."""
     learnings = recall(tags)
     learnings_text = format_learnings(learnings)
@@ -603,7 +608,7 @@ async def _run_opinion(task: str, tags: list[str] | None = None,
             system += f"\n\n{learnings_text}"
         system += "\n\nAt the end, include: CONFIDENCE: X/10"
         tasks.append(claude(task, model="sonnet", system=system,
-                            tools=tools, cwd=cwd))
+                            tools=tools, tools_rw=tools_rw, cwd=cwd))
 
     results = await asyncio.gather(*tasks)
     successful = [r for r in results if not r.get("error")]
@@ -661,7 +666,9 @@ def main():
     p.add_argument("--max-loops", type=int, default=MAX_LOOPS,
                    help=f"Max verify→re-plan loops (default: {MAX_LOOPS})")
     p.add_argument("--tools", action="store_true",
-                   help="Give workers tool access (Read, Glob, Grep, Bash)")
+                   help="Give workers tool access (Read, Glob, Grep, Bash - read-only)")
+    p.add_argument("--tools-rw", action="store_true",
+                   help="Give workers read-write tool access (Read, Glob, Grep, Bash, Edit, Write)")
     p.add_argument("--cwd", type=str, default=None,
                    help="Working directory for workers (default: current dir)")
     p.add_argument("--stdin", action="store_true", help="Read prompt from stdin")
@@ -676,6 +683,12 @@ def main():
     TIMEOUT_SECONDS = args.timeout
     K_AHEAD = args.k_ahead
     MAX_LOOPS = args.max_loops
+
+    # Warn if using read-write tools
+    if args.tools_rw:
+        print("⚠️  WARNING: --tools-rw enables parallel workers to EDIT and WRITE files. "
+              "Risk of data corruption if multiple workers write to same files simultaneously.",
+              file=sys.stderr)
 
     # Sessions mode
     if args.sessions:
@@ -720,7 +733,7 @@ def main():
 
     cwd = args.cwd or os.getcwd()
     answer = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
-                             tools=args.tools, cwd=cwd, workers=args.workers))
+                             tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers))
 
     if args.json:
         print(json.dumps({"answer": answer, "prompt": prompt, "tags": tags, "mode": args.mode}))
