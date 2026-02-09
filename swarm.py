@@ -265,7 +265,7 @@ def red_flag(result: dict, max_len: int = 3000, is_code_task: bool = False) -> s
 
 # ── Phase 1: DECOMPOSE ────────────────────────────────────────────────────
 
-async def decompose(task: str, learnings_text: str, verbose: bool = False) -> tuple[list[str], float]:
+async def decompose(task: str, learnings_text: str, verbose: bool = False, timeout: float = TIMEOUT_SECONDS) -> tuple[list[str], float]:
     """One smart agent breaks the task into atomic steps. Returns (steps, cost)."""
     system = f"""You are a task decomposer. Break the given task into a numbered list of small, atomic steps.
 
@@ -281,7 +281,7 @@ Rules:
 Respond with ONLY a JSON array of step strings. Example:
 ["Step 1: Define the data model with fields X, Y, Z", "Step 2: Implement the API endpoint", ...]"""
 
-    result = await claude(task, model=MODELS["planner"], system=system)
+    result = await claude(task, model=MODELS["planner"], system=system, timeout=timeout)
     cost = result.get("cost", 0)
     if result["error"]:
         if verbose:
@@ -321,6 +321,8 @@ async def vote_step(
     tools_rw: bool = False,
     cwd: str | None = None,
     worker_model: str = "haiku",
+    timeout: float = TIMEOUT_SECONDS,
+    k_ahead: int = K_AHEAD,
 ) -> dict:
     """Adaptive first-to-ahead-by-K voting for a single step.
 
@@ -358,7 +360,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
         for i in range(batch_count):
             role = ROLES[(total_sampled + i) % len(ROLES)]
             tasks.append(claude(step_prompt, model=worker_model, system=role,
-                               tools=tools, tools_rw=tools_rw, cwd=cwd))
+                               tools=tools, tools_rw=tools_rw, cwd=cwd, timeout=timeout))
 
         results = await asyncio.gather(*tasks)
         total_sampled += batch_count
@@ -386,7 +388,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
             continue
 
         # Check if we have K agreeing responses
-        agreement, agreement_cost = await _check_agreement(all_responses, step, K_AHEAD)
+        agreement, agreement_cost = await _check_agreement(all_responses, step, k_ahead)
         total_cost += agreement_cost
         if agreement:
             if verbose:
@@ -466,7 +468,7 @@ MERGED: <if AGREE_COUNT >= {k}, merge the agreeing responses into one clean answ
 
 # ── Phase 3: COMPOSE ──────────────────────────────────────────────────────
 
-async def compose(task: str, step_results: list[dict], verbose: bool = False) -> tuple[str, float]:
+async def compose(task: str, step_results: list[dict], verbose: bool = False, timeout: float = TIMEOUT_SECONDS) -> tuple[str, float]:
     """Merge step results into a single coherent answer. Returns (answer, cost)."""
     if len(step_results) == 1:
         return step_results[0]["answer"], 0
@@ -489,14 +491,14 @@ Compose these into ONE coherent, complete answer to the original task.
 Preserve all important details. Remove redundancy. Make it flow naturally."""
 
     result = await claude(compose_prompt, model=MODELS["composer"],
-                          system="You are a skilled editor. Compose step results into a clear, complete answer.")
+                          system="You are a skilled editor. Compose step results into a clear, complete answer.", timeout=timeout)
     cost = result.get("cost", 0)
     return result.get("content", "") or steps_block, cost
 
 
 # ── Phase 4: VERIFY ───────────────────────────────────────────────────────
 
-async def verify(task: str, answer: str, verbose: bool = False) -> dict:
+async def verify(task: str, answer: str, verbose: bool = False, timeout: float = TIMEOUT_SECONDS) -> dict:
     """Check if the composed answer actually solves the original task."""
     verify_prompt = f"""Original task: {task}
 
@@ -520,7 +522,7 @@ Example: "LEARNING: [strategy] When decomposing auth tasks, always separate toke
 The LEARNING field is MANDATORY. Use one of these exact categories: mistake, strategy, pattern, constraint."""
 
     result = await claude(verify_prompt, model=MODELS["verifier"],
-                          system="You are a strict quality reviewer. Only PASS if the answer is genuinely complete and correct.")
+                          system="You are a strict quality reviewer. Only PASS if the answer is genuinely complete and correct.", timeout=timeout)
     text = result.get("content", "")
     cost = result.get("cost", 0)
 
@@ -543,7 +545,8 @@ The LEARNING field is MANDATORY. Use one of these exact categories: mistake, str
 async def run(task: str, tags: list[str] | None = None,
               verbose: bool = False, mode: str = "maker",
               tools: bool = False, tools_rw: bool = False, cwd: str | None = None,
-              workers: int = 3, worker_model: str = "haiku", max_cost: float = 1.00) -> str:
+              workers: int = 3, worker_model: str = "haiku", max_cost: float = 1.00,
+              timeout: float = TIMEOUT_SECONDS, k_ahead: int = K_AHEAD, max_loops: int = MAX_LOOPS) -> str:
     """Main entry point.
 
     mode="maker": decompose → vote per step → compose → verify → learn → loop
@@ -563,7 +566,7 @@ async def run(task: str, tags: list[str] | None = None,
     if verbose and learnings:
         print(f"\n[recall] Loaded {len(learnings)} learnings", file=sys.stderr)
 
-    for loop in range(MAX_LOOPS):
+    for loop in range(max_loops):
         # Check cost ceiling before continuing
         if total_cost > max_cost:
             if verbose:
@@ -573,12 +576,12 @@ async def run(task: str, tags: list[str] | None = None,
 
         if verbose:
             print(f"\n{'='*60}", file=sys.stderr)
-            print(f"[loop {loop+1}/{MAX_LOOPS}]", file=sys.stderr)
+            print(f"[loop {loop+1}/{max_loops}]", file=sys.stderr)
 
         # 2. DECOMPOSE
         if verbose:
             print(f"\n[decompose] Breaking task into atomic steps...", file=sys.stderr)
-        steps, decompose_cost = await decompose(task, learnings_text, verbose=verbose)
+        steps, decompose_cost = await decompose(task, learnings_text, verbose=verbose, timeout=timeout)
         total_cost += decompose_cost
         if verbose:
             print(f"[decompose] {len(steps)} steps:", file=sys.stderr)
@@ -605,7 +608,7 @@ async def run(task: str, tags: list[str] | None = None,
 
             result = await vote_step(step, i + 1, len(steps), context,
                                     verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd,
-                                    worker_model=worker_model)
+                                    worker_model=worker_model, timeout=timeout, k_ahead=k_ahead)
             step_results.append(result)
             total_cost += result.get("cost", 0)
 
@@ -631,13 +634,13 @@ async def run(task: str, tags: list[str] | None = None,
         # 4. COMPOSE
         if verbose:
             print(f"\n[compose] Merging step results...", file=sys.stderr)
-        answer, compose_cost = await compose(task, step_results, verbose=verbose)
+        answer, compose_cost = await compose(task, step_results, verbose=verbose, timeout=timeout)
         total_cost += compose_cost
 
         # 5. VERIFY
         if verbose:
             print(f"\n[verify] Checking answer against original task...", file=sys.stderr)
-        verification = await verify(task, answer, verbose=verbose)
+        verification = await verify(task, answer, verbose=verbose, timeout=timeout)
         total_cost += verification.get("cost", 0)
 
         if verbose:
@@ -672,7 +675,7 @@ async def run(task: str, tags: list[str] | None = None,
     if verbose:
         elapsed = round(time.monotonic() - t0, 2)
         total_cost_display = round(total_cost, 3)
-        print(f"\n[done] Exhausted {MAX_LOOPS} loops. Returning best effort. {elapsed}s, ${total_cost_display} total", file=sys.stderr)
+        print(f"\n[done] Exhausted {max_loops} loops. Returning best effort. {elapsed}s, ${total_cost_display} total", file=sys.stderr)
     return {"answer": answer, "cost": total_cost}
 
 
@@ -741,8 +744,6 @@ async def _run_opinion(task: str, tags: list[str] | None = None,
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def main():
-    global TIMEOUT_SECONDS, K_AHEAD, MAX_LOOPS
-
     import argparse
     p = argparse.ArgumentParser(
         description="Swarm v2: MAKER-informed multi-agent collective intelligence",
@@ -783,11 +784,6 @@ def main():
     p.add_argument("--max-cost", type=float, default=1.00,
                    help="Max total cost in USD before stopping. Default: $1.00")
     args = p.parse_args()
-
-    # Apply config overrides
-    TIMEOUT_SECONDS = args.timeout
-    K_AHEAD = args.k_ahead
-    MAX_LOOPS = args.max_loops
 
     # Warn if using read-write tools
     if args.tools_rw:
@@ -839,7 +835,8 @@ def main():
     cwd = args.cwd or os.getcwd()
     result = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
                              tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers,
-                             worker_model=args.worker_model, max_cost=args.max_cost))
+                             worker_model=args.worker_model, max_cost=args.max_cost,
+                             timeout=args.timeout, k_ahead=args.k_ahead, max_loops=args.max_loops))
 
     # Handle both string and dict returns
     if isinstance(result, dict):
