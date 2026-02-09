@@ -258,8 +258,8 @@ def red_flag(result: dict, max_len: int = 3000, is_code_task: bool = False) -> s
 
 # ── Phase 1: DECOMPOSE ────────────────────────────────────────────────────
 
-async def decompose(task: str, learnings_text: str, verbose: bool = False) -> list[str]:
-    """One smart agent breaks the task into atomic steps."""
+async def decompose(task: str, learnings_text: str, verbose: bool = False) -> tuple[list[str], float]:
+    """One smart agent breaks the task into atomic steps. Returns (steps, cost)."""
     system = f"""You are a task decomposer. Break the given task into a numbered list of small, atomic steps.
 
 Rules:
@@ -275,10 +275,11 @@ Respond with ONLY a JSON array of step strings. Example:
 ["Step 1: Define the data model with fields X, Y, Z", "Step 2: Implement the API endpoint", ...]"""
 
     result = await claude(task, model=MODELS["planner"], system=system)
+    cost = result.get("cost", 0)
     if result["error"]:
         if verbose:
             print(f"  [decompose] ERROR: {result['error']}", file=sys.stderr)
-        return [task]  # fallback: treat whole task as one step
+        return [task], cost  # fallback: treat whole task as one step
 
     # Parse JSON array from response
     content = result.get("content", "")
@@ -288,14 +289,14 @@ Respond with ONLY a JSON array of step strings. Example:
         try:
             steps = json.loads(json_match.group())
             if isinstance(steps, list) and all(isinstance(s, str) for s in steps):
-                return steps
+                return steps, cost
         except json.JSONDecodeError:
             pass
 
     # Fallback: split numbered lines
     lines = [re.sub(r'^\d+[\.\)]\s*', '', l.strip())
              for l in content.splitlines() if re.match(r'^\d+[\.\)]', l.strip())]
-    return lines if lines else [task]
+    return (lines if lines else [task]), cost
 
 
 # ── Phase 2: VOTE per step (MAKER insight #2) ─────────────────────────────
@@ -321,6 +322,7 @@ async def vote_step(
     flagged_reasons = {}  # track which red-flag reasons fired most
     total_sampled = 0
     round_num = 0
+    total_cost = 0
 
     step_prompt = f"""You are executing step {step_num}/{total_steps} of a larger task.
 
@@ -344,8 +346,9 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
         results = await asyncio.gather(*tasks)
         total_sampled += batch_count
 
-        # Red-flag filter
+        # Accumulate costs and red-flag filter
         for r in results:
+            total_cost += r.get("cost", 0)
             flag = red_flag(r)
             if flag:
                 flagged_count += 1
@@ -366,7 +369,8 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
             continue
 
         # Check if we have K agreeing responses
-        agreement = await _check_agreement(all_responses, step, K_AHEAD)
+        agreement, agreement_cost = await _check_agreement(all_responses, step, K_AHEAD)
+        total_cost += agreement_cost
         if agreement:
             if verbose:
                 print(f"  [vote step {step_num}] CONSENSUS after {total_sampled} samples "
@@ -381,6 +385,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
                 "flagged_reasons": flagged_reasons,
                 "rounds": round_num,
                 "session_ids": [r.get("session_id") for r in all_responses if r.get("session_id")],
+                "cost": total_cost,
             }
 
     # Fallback: no K-agreement reached, use longest response
@@ -397,11 +402,12 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
         "flagged_reasons": flagged_reasons,
         "rounds": round_num,
         "session_ids": [r.get("session_id") for r in all_responses if r.get("session_id")],
+        "cost": total_cost,
     }
 
 
-async def _check_agreement(responses: list[dict], step: str, k: int) -> dict | None:
-    """Ask cheap model if K+ responses substantively agree. Returns merged answer or None."""
+async def _check_agreement(responses: list[dict], step: str, k: int) -> tuple[dict | None, float]:
+    """Ask cheap model if K+ responses substantively agree. Returns (merged_answer, cost) or (None, cost)."""
     summaries = "\n---\n".join(
         f"Response {i+1}:\n{r['content'][:1500]}"
         for i, r in enumerate(responses)
@@ -422,29 +428,30 @@ MERGED: <if AGREE_COUNT >= {k}, merge the agreeing responses into one clean answ
 
     result = await claude(check_prompt, model="haiku",
                           system="You are a concise evaluator. Count agreement precisely.")
+    cost = result.get("cost", 0)
     text = result.get("content", "")
 
     count_match = re.search(r"AGREE_COUNT:\s*(\d+)", text)
     if not count_match:
-        return None
+        return None, cost
 
     agree_count = int(count_match.group(1))
     if agree_count < k:
-        return None
+        return None, cost
 
     merged_match = re.search(r"MERGED:\s*(.+)", text, re.DOTALL)
     if not merged_match or merged_match.group(1).strip().upper() == "NONE":
-        return None
+        return None, cost
 
-    return {"agree_count": agree_count, "merged": merged_match.group(1).strip()}
+    return {"agree_count": agree_count, "merged": merged_match.group(1).strip()}, cost
 
 
 # ── Phase 3: COMPOSE ──────────────────────────────────────────────────────
 
-async def compose(task: str, step_results: list[dict], verbose: bool = False) -> str:
-    """Merge step results into a single coherent answer."""
+async def compose(task: str, step_results: list[dict], verbose: bool = False) -> tuple[str, float]:
+    """Merge step results into a single coherent answer. Returns (answer, cost)."""
     if len(step_results) == 1:
-        return step_results[0]["answer"]
+        return step_results[0]["answer"], 0
 
     steps_block = "\n\n".join(
         f"### Step {r['step_num']}: {r['step']}\n"
@@ -465,7 +472,8 @@ Preserve all important details. Remove redundancy. Make it flow naturally."""
 
     result = await claude(compose_prompt, model=MODELS["composer"],
                           system="You are a skilled editor. Compose step results into a clear, complete answer.")
-    return result.get("content", "") or steps_block
+    cost = result.get("cost", 0)
+    return result.get("content", "") or steps_block, cost
 
 
 # ── Phase 4: VERIFY ───────────────────────────────────────────────────────
@@ -491,6 +499,7 @@ LEARNING: [category] <any reusable insight from this evaluation>"""
     result = await claude(verify_prompt, model=MODELS["verifier"],
                           system="You are a strict quality reviewer. Only PASS if the answer is genuinely complete and correct.")
     text = result.get("content", "")
+    cost = result.get("cost", 0)
 
     verdict_match = re.search(r"VERDICT:\s*(PASS|FAIL)", text, re.IGNORECASE)
     conf_match = re.search(r"CONFIDENCE:\s*(\d+(?:\.\d+)?)", text)
@@ -502,6 +511,7 @@ LEARNING: [category] <any reusable insight from this evaluation>"""
         "issues": issues_match.group(1).strip() if issues_match else "",
         "raw": text,
         "session_id": result.get("session_id"),
+        "cost": cost,
     }
 
 
@@ -536,7 +546,8 @@ async def run(task: str, tags: list[str] | None = None,
         # 2. DECOMPOSE
         if verbose:
             print(f"\n[decompose] Breaking task into atomic steps...", file=sys.stderr)
-        steps = await decompose(task, learnings_text, verbose=verbose)
+        steps, decompose_cost = await decompose(task, learnings_text, verbose=verbose)
+        total_cost += decompose_cost
         if verbose:
             print(f"[decompose] {len(steps)} steps:", file=sys.stderr)
             for i, s in enumerate(steps):
@@ -563,6 +574,7 @@ async def run(task: str, tags: list[str] | None = None,
             result = await vote_step(step, i + 1, len(steps), context,
                                     verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd)
             step_results.append(result)
+            total_cost += result.get("cost", 0)
 
             # Save best session for resume
             for sid in result.get("session_ids", []):
@@ -586,12 +598,14 @@ async def run(task: str, tags: list[str] | None = None,
         # 4. COMPOSE
         if verbose:
             print(f"\n[compose] Merging step results...", file=sys.stderr)
-        answer = await compose(task, step_results, verbose=verbose)
+        answer, compose_cost = await compose(task, step_results, verbose=verbose)
+        total_cost += compose_cost
 
         # 5. VERIFY
         if verbose:
             print(f"\n[verify] Checking answer against original task...", file=sys.stderr)
         verification = await verify(task, answer, verbose=verbose)
+        total_cost += verification.get("cost", 0)
 
         if verbose:
             status = "PASS" if verification["passed"] else "FAIL"
@@ -608,9 +622,10 @@ async def run(task: str, tags: list[str] | None = None,
         if verification["passed"]:
             elapsed = round(time.monotonic() - t0, 2)
             if verbose:
-                print(f"\n[done] PASSED on loop {loop+1}, {elapsed}s total", file=sys.stderr)
+                total_cost_display = round(total_cost, 3)
+                print(f"\n[done] PASSED on loop {loop+1}, {elapsed}s, ${total_cost_display} total", file=sys.stderr)
                 print(f"[sessions] Resumable sessions saved to: python swarm.py --sessions", file=sys.stderr)
-            return answer
+            return {"answer": answer, "cost": total_cost}
 
         # Failed — feed issues back as learnings for next loop
         if verbose:
@@ -623,18 +638,21 @@ async def run(task: str, tags: list[str] | None = None,
     # Exhausted all loops — return best effort
     if verbose:
         elapsed = round(time.monotonic() - t0, 2)
-        print(f"\n[done] Exhausted {MAX_LOOPS} loops. Returning best effort. {elapsed}s total", file=sys.stderr)
-    return answer
+        total_cost_display = round(total_cost, 3)
+        print(f"\n[done] Exhausted {MAX_LOOPS} loops. Returning best effort. {elapsed}s, ${total_cost_display} total", file=sys.stderr)
+    return {"answer": answer, "cost": total_cost}
 
 
 # ── v1 Opinion Mode (kept for comparison / simple questions) ──────────────
 
 async def _run_opinion(task: str, tags: list[str] | None = None,
                        num_workers: int = 3, verbose: bool = False,
-                       tools: bool = False, tools_rw: bool = False, cwd: str | None = None) -> str:
-    """v1 mode: parallel diverse opinions + consensus/judge."""
+                       tools: bool = False, tools_rw: bool = False, cwd: str | None = None) -> tuple[str, float]:
+    """v1 mode: parallel diverse opinions + consensus/judge. Returns (answer, total_cost)."""
+    t0 = time.monotonic()
     learnings = recall(tags)
     learnings_text = format_learnings(learnings)
+    total_cost = 0
 
     # Spawn workers
     if verbose:
@@ -652,9 +670,12 @@ async def _run_opinion(task: str, tags: list[str] | None = None,
 
     results = await asyncio.gather(*tasks)
     successful = [r for r in results if not r.get("error")]
+    # Accumulate worker costs
+    for r in results:
+        total_cost += r.get("cost", 0)
 
     if not successful:
-        return "[ERROR] All workers failed"
+        return {"answer": "[ERROR] All workers failed", "cost": total_cost}
 
     # Consensus check
     summaries = "\n---\n".join(r["content"][:1500] for r in successful)
@@ -662,6 +683,7 @@ async def _run_opinion(task: str, tags: list[str] | None = None,
         f"Do these responses agree?\n\n{summaries}\n\nAGREE: YES or NO\nIf YES: MERGED: <combined>",
         model="haiku", system="Concise evaluator.")
     text = check.get("content", "")
+    total_cost += check.get("cost", 0)
 
     if re.search(r"AGREE:\s*YES", text, re.IGNORECASE):
         m = re.search(r"MERGED:\s*(.+)", text, re.DOTALL)
@@ -672,9 +694,14 @@ async def _run_opinion(task: str, tags: list[str] | None = None,
         judge_result = await claude(judge_prompt, model="sonnet",
                                     system="You are a judge. Score each, synthesize the best.")
         answer = judge_result.get("content", successful[0]["content"])
+        total_cost += judge_result.get("cost", 0)
 
     learn(answer, tags)
-    return answer
+    elapsed = round(time.monotonic() - t0, 2)
+    if verbose:
+        total_cost_display = round(total_cost, 3)
+        print(f"[done] Opinion mode complete, {elapsed}s, ${total_cost_display} total", file=sys.stderr)
+    return {"answer": answer, "cost": total_cost}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -772,11 +799,20 @@ def main():
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
 
     cwd = args.cwd or os.getcwd()
-    answer = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
+    result = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
                              tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers))
 
+    # Handle both string and dict returns
+    if isinstance(result, dict):
+        answer = result.get("answer", "")
+        cost = result.get("cost", 0)
+    else:
+        answer = result
+        cost = 0
+
     if args.json:
-        print(json.dumps({"answer": answer, "prompt": prompt, "tags": tags, "mode": args.mode}))
+        output = {"answer": answer, "prompt": prompt, "tags": tags, "mode": args.mode, "cost": round(cost, 3)}
+        print(json.dumps(output))
     else:
         print(answer)
 
