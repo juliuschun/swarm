@@ -75,16 +75,20 @@ def recall(tags: list[str] | None = None, limit: int = 5) -> list[dict]:
     return learnings[:limit]
 
 
-def learn(text: str, tags: list[str] | None = None) -> list[dict]:
+def learn(text: str, tags: list[str] | None = None, verbose: bool = False) -> list[dict]:
     pattern = r"LEARNING:\s*\[(mistake|strategy|pattern|constraint)\]\s*(.+)"
     matches = re.findall(pattern, text, re.IGNORECASE)
     if not matches:
+        if verbose:
+            print(f"[learn] No LEARNING: patterns found in text (length={len(text)})", file=sys.stderr)
         return []
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     entries = []
+    filtered = []
     for category, content in matches:
         content = content.strip()
-        if len(content) < 20 or len(content) > 500:
+        if len(content) < 15 or len(content) > 500:
+            filtered.append((category, content, len(content)))
             continue
         entries.append({
             "id": uuid.uuid4().hex[:12],
@@ -490,11 +494,16 @@ Evaluate this answer:
 2. Are there any errors, gaps, or missing pieces?
 3. Is it actionable and specific?
 
-Reply in this EXACT format:
+YOU MUST reply in this EXACT format (all 4 fields required):
+
 VERDICT: PASS or FAIL
 CONFIDENCE: X/10
 ISSUES: <list any problems, or "none">
-LEARNING: [category] <any reusable insight from this evaluation>"""
+LEARNING: [mistake|strategy|pattern|constraint] <Extract ONE reusable insight from this task/answer>
+
+Example: "LEARNING: [strategy] When decomposing auth tasks, always separate token generation from validation steps"
+
+The LEARNING field is MANDATORY. Use one of these exact categories: mistake, strategy, pattern, constraint."""
 
     result = await claude(verify_prompt, model=MODELS["verifier"],
                           system="You are a strict quality reviewer. Only PASS if the answer is genuinely complete and correct.")
