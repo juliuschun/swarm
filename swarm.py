@@ -27,12 +27,15 @@ from pathlib import Path
 
 # ── Config ─────────────────────────────────────────────────────────────────
 
-MODELS = {
+# Default models (can be overridden by CLI flags)
+DEFAULT_MODELS = {
     "planner":   "sonnet",   # decomposes tasks into atomic steps
     "worker":    "haiku",    # executes steps — cheap, voting makes it reliable
     "composer":  "sonnet",   # merges step results into final answer
     "verifier":  "sonnet",   # checks result against original task
 }
+
+MODELS = DEFAULT_MODELS.copy()
 
 K_AHEAD = 3              # votes ahead needed to win (from MAKER paper)
 MAX_SAMPLES = 10          # max vote samples per step before fallback
@@ -314,6 +317,7 @@ async def vote_step(
     tools: bool = False,
     tools_rw: bool = False,
     cwd: str | None = None,
+    worker_model: str = "haiku",
 ) -> dict:
     """Adaptive first-to-ahead-by-K voting for a single step.
 
@@ -344,7 +348,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
         tasks = []
         for i in range(batch_count):
             role = ROLES[(total_sampled + i) % len(ROLES)]
-            tasks.append(claude(step_prompt, model=MODELS["worker"], system=role,
+            tasks.append(claude(step_prompt, model=worker_model, system=role,
                                tools=tools, tools_rw=tools_rw, cwd=cwd))
 
         results = await asyncio.gather(*tasks)
@@ -528,7 +532,8 @@ The LEARNING field is MANDATORY. Use one of these exact categories: mistake, str
 
 async def run(task: str, tags: list[str] | None = None,
               verbose: bool = False, mode: str = "maker",
-              tools: bool = False, tools_rw: bool = False, cwd: str | None = None, workers: int = 3) -> str:
+              tools: bool = False, tools_rw: bool = False, cwd: str | None = None,
+              workers: int = 3, worker_model: str = "haiku") -> str:
     """Main entry point.
 
     mode="maker": decompose → vote per step → compose → verify → learn → loop
@@ -536,7 +541,7 @@ async def run(task: str, tags: list[str] | None = None,
     """
     if mode == "opinion":
         return await _run_opinion(task, tags=tags, num_workers=workers, verbose=verbose,
-                                  tools=tools, tools_rw=tools_rw, cwd=cwd)
+                                  tools=tools, tools_rw=tools_rw, cwd=cwd, worker_model=worker_model)
 
     t0 = time.monotonic()
     total_cost = 0
@@ -581,7 +586,8 @@ async def run(task: str, tags: list[str] | None = None,
                 context += f"\n\nPrior step results:\n{prior}"
 
             result = await vote_step(step, i + 1, len(steps), context,
-                                    verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd)
+                                    verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd,
+                                    worker_model=worker_model)
             step_results.append(result)
             total_cost += result.get("cost", 0)
 
@@ -656,7 +662,8 @@ async def run(task: str, tags: list[str] | None = None,
 
 async def _run_opinion(task: str, tags: list[str] | None = None,
                        num_workers: int = 3, verbose: bool = False,
-                       tools: bool = False, tools_rw: bool = False, cwd: str | None = None) -> tuple[str, float]:
+                       tools: bool = False, tools_rw: bool = False, cwd: str | None = None,
+                       worker_model: str = "haiku") -> tuple[str, float]:
     """v1 mode: parallel diverse opinions + consensus/judge. Returns (answer, total_cost)."""
     t0 = time.monotonic()
     learnings = recall(tags)
@@ -674,7 +681,7 @@ async def _run_opinion(task: str, tags: list[str] | None = None,
         if learnings_text:
             system += f"\n\n{learnings_text}"
         system += "\n\nAt the end, include: CONFIDENCE: X/10"
-        tasks.append(claude(task, model="sonnet", system=system,
+        tasks.append(claude(task, model=worker_model, system=system,
                             tools=tools, tools_rw=tools_rw, cwd=cwd))
 
     results = await asyncio.gather(*tasks)
@@ -734,6 +741,8 @@ def main():
                    help="maker=decompose+vote+verify loop (default), opinion=v1 parallel opinions")
     p.add_argument("--workers", type=int, default=3,
                    help="Number of workers for opinion mode (default: 3)")
+    p.add_argument("--worker-model", type=str, default="haiku",
+                   help="Model for workers in both modes: haiku (cheap+voting reliable, default) or sonnet")
     p.add_argument("--tags", type=str, default="", help="Comma-separated memory tags")
     p.add_argument("-t", "--timeout", type=int, default=TIMEOUT_SECONDS,
                    help=f"Timeout per agent call (default: {TIMEOUT_SECONDS}s)")
@@ -809,7 +818,8 @@ def main():
 
     cwd = args.cwd or os.getcwd()
     result = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
-                             tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers))
+                             tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers,
+                             worker_model=args.worker_model))
 
     # Handle both string and dict returns
     if isinstance(result, dict):
