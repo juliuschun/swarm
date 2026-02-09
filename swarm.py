@@ -214,8 +214,17 @@ async def claude(
 
 # ── Red-Flagging (MAKER insight #3) ───────────────────────────────────────
 
-def red_flag(result: dict, max_len: int = 3000) -> str | None:
-    """Check if a response should be discarded. Returns reason or None if OK."""
+def red_flag(result: dict, max_len: int = 3000, is_code_task: bool = False) -> str | None:
+    """Check if a response should be discarded. Returns reason or None if OK.
+
+    Checks:
+    1. Errors
+    2. Empty/trivially short responses
+    3. Response length exceeding max
+    4. Low self-reported confidence
+    5. Refusal patterns (I cannot, I'm unable, as an AI)
+    6. Code-only responses (>80% indented lines for non-code tasks)
+    """
     if result.get("error"):
         return f"error: {result['error']}"
     content = result.get("content", "")
@@ -223,6 +232,23 @@ def red_flag(result: dict, max_len: int = 3000) -> str | None:
         return "empty or trivially short response"
     if len(content) > max_len:
         return f"response too long ({len(content)} chars > {max_len})"
+
+    # Check for refusal patterns
+    lower_content = content.lower()
+    refusal_patterns = ["i cannot", "i'm unable", "as an ai"]
+    for pattern in refusal_patterns:
+        if pattern in lower_content:
+            return f"likely refusal: contains '{pattern}'"
+
+    # Check for code-only responses (>80% indented lines) for non-code tasks
+    if not is_code_task:
+        lines = content.split("\n")
+        if len(lines) > 3:  # only check if enough lines to be meaningful
+            indented = sum(1 for line in lines if line and (line[0] in " \t"))
+            indent_ratio = indented / len(lines)
+            if indent_ratio > 0.8:
+                return f"mostly code with no explanation ({indent_ratio:.0%} indented lines)"
+
     # Low self-reported confidence
     conf_match = re.search(r"CONFIDENCE:\s*(\d+(?:\.\d+)?)", content)
     if conf_match and float(conf_match.group(1)) < 3:
@@ -292,6 +318,7 @@ async def vote_step(
     """
     all_responses = []   # valid (non-red-flagged) responses
     flagged_count = 0
+    flagged_reasons = {}  # track which red-flag reasons fired most
     total_sampled = 0
     round_num = 0
 
@@ -322,6 +349,8 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
             flag = red_flag(r)
             if flag:
                 flagged_count += 1
+                # Track which reasons fire
+                flagged_reasons[flag] = flagged_reasons.get(flag, 0) + 1
                 if verbose:
                     print(f"  [vote step {step_num}] RED-FLAG: {flag}", file=sys.stderr)
             else:
@@ -349,6 +378,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
                 "agree_count": agreement["agree_count"],
                 "total_sampled": total_sampled,
                 "flagged": flagged_count,
+                "flagged_reasons": flagged_reasons,
                 "rounds": round_num,
                 "session_ids": [r.get("session_id") for r in all_responses if r.get("session_id")],
             }
@@ -364,6 +394,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
         "agree_count": 1,
         "total_sampled": total_sampled,
         "flagged": flagged_count,
+        "flagged_reasons": flagged_reasons,
         "rounds": round_num,
         "session_ids": [r.get("session_id") for r in all_responses if r.get("session_id")],
     }
@@ -542,6 +573,15 @@ async def run(task: str, tags: list[str] | None = None,
             total_votes = sum(r["total_sampled"] for r in step_results)
             total_flagged = sum(r["flagged"] for r in step_results)
             print(f"\n[execute] Done. {total_votes} total samples, {total_flagged} red-flagged", file=sys.stderr)
+            # Aggregate flag reasons across all steps
+            all_flag_reasons = {}
+            for r in step_results:
+                for reason, count in r.get("flagged_reasons", {}).items():
+                    all_flag_reasons[reason] = all_flag_reasons.get(reason, 0) + count
+            if all_flag_reasons:
+                print(f"[execute] Flag reasons:", file=sys.stderr)
+                for reason, count in sorted(all_flag_reasons.items(), key=lambda x: -x[1]):
+                    print(f"  - {reason}: {count}x", file=sys.stderr)
 
         # 4. COMPOSE
         if verbose:
