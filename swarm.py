@@ -286,6 +286,7 @@ Respond with ONLY a JSON array of step strings. Example:
     if result["error"]:
         if verbose:
             print(f"  [decompose] ERROR: {result['error']}", file=sys.stderr)
+        print("[decompose] WARNING: Fallback to single-step mode (no decomposition benefit)", file=sys.stderr)
         return [task], cost  # fallback: treat whole task as one step
 
     # Parse JSON array from response
@@ -303,6 +304,8 @@ Respond with ONLY a JSON array of step strings. Example:
     # Fallback: split numbered lines
     lines = [re.sub(r'^\d+[\.\)]\s*', '', l.strip())
              for l in content.splitlines() if re.match(r'^\d+[\.\)]', l.strip())]
+    if not lines:
+        print("[decompose] WARNING: Fallback to single-step mode (no decomposition benefit)", file=sys.stderr)
     return (lines if lines else [task]), cost
 
 
@@ -325,6 +328,12 @@ async def vote_step(
     Keeps going until one answer leads by K votes.
     Uses cheap Haiku for agreement checks.
     """
+    # Force sequential mode if tools_rw is enabled
+    batch_size = BATCH_SIZE
+    if tools_rw:
+        batch_size = 1
+        print("[vote] Sequential mode: --tools-rw forces batch_size=1 to prevent concurrent writes", file=sys.stderr)
+
     all_responses = []   # valid (non-red-flagged) responses
     flagged_count = 0
     flagged_reasons = {}  # track which red-flag reasons fired most
@@ -344,7 +353,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
     while total_sampled < MAX_SAMPLES:
         round_num += 1
         # Launch a batch of workers in parallel
-        batch_count = min(BATCH_SIZE, MAX_SAMPLES - total_sampled)
+        batch_count = min(batch_size, MAX_SAMPLES - total_sampled)
         tasks = []
         for i in range(batch_count):
             role = ROLES[(total_sampled + i) % len(ROLES)]
@@ -399,6 +408,7 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
     # Fallback: no K-agreement reached, use longest response
     if verbose:
         print(f"  [vote step {step_num}] NO CONSENSUS after {MAX_SAMPLES} samples. Using best response.", file=sys.stderr)
+    print(f"[vote step {step_num}] WARNING: Fallback to single-response mode (no consensus reached)", file=sys.stderr)
     best = max(all_responses, key=lambda r: len(r.get("content", ""))) if all_responses else {"content": ""}
     return {
         "step": step,
@@ -533,7 +543,7 @@ The LEARNING field is MANDATORY. Use one of these exact categories: mistake, str
 async def run(task: str, tags: list[str] | None = None,
               verbose: bool = False, mode: str = "maker",
               tools: bool = False, tools_rw: bool = False, cwd: str | None = None,
-              workers: int = 3, worker_model: str = "haiku") -> str:
+              workers: int = 3, worker_model: str = "haiku", max_cost: float = 1.00) -> str:
     """Main entry point.
 
     mode="maker": decompose → vote per step → compose → verify → learn → loop
@@ -545,6 +555,7 @@ async def run(task: str, tags: list[str] | None = None,
 
     t0 = time.monotonic()
     total_cost = 0
+    answer = ""  # Initialize before loop to avoid NameError on early cost ceiling hit
 
     # 1. RECALL
     learnings = recall(tags)
@@ -553,6 +564,13 @@ async def run(task: str, tags: list[str] | None = None,
         print(f"\n[recall] Loaded {len(learnings)} learnings", file=sys.stderr)
 
     for loop in range(MAX_LOOPS):
+        # Check cost ceiling before continuing
+        if total_cost > max_cost:
+            if verbose:
+                print(f"\n[cost-limit] WARNING: Total cost ${round(total_cost, 3)} exceeds limit ${max_cost}. "
+                      f"Returning best answer so far.", file=sys.stderr)
+            return {"answer": answer, "cost": total_cost}
+
         if verbose:
             print(f"\n{'='*60}", file=sys.stderr)
             print(f"[loop {loop+1}/{MAX_LOOPS}]", file=sys.stderr)
@@ -762,6 +780,8 @@ def main():
     p.add_argument("--resume", nargs="?", const="BEST", metavar="SESSION_ID",
                    help="Resume a worker session (default: best from last run)")
     p.add_argument("--sessions", action="store_true", help="List resumable sessions")
+    p.add_argument("--max-cost", type=float, default=1.00,
+                   help="Max total cost in USD before stopping. Default: $1.00")
     args = p.parse_args()
 
     # Apply config overrides
@@ -819,7 +839,7 @@ def main():
     cwd = args.cwd or os.getcwd()
     result = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
                              tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers,
-                             worker_model=args.worker_model))
+                             worker_model=args.worker_model, max_cost=args.max_cost))
 
     # Handle both string and dict returns
     if isinstance(result, dict):
