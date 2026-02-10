@@ -1,0 +1,14 @@
+[project]
+name = "swarm-maker"
+version = "0.1.0"
+description = "MAKER-informed multi-agent collective intelligence for Claude Code"
+requires-python = ">=3.10"
+license = "MIT"
+readme = "README.md"
+
+[project.scripts]
+swarm = "swarm.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"

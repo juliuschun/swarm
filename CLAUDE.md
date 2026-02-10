@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A single-file Python system (`swarm.py`) that uses Claude Code agents as workers in a MAKER-inspired loop:
+A Python package (`swarm/`) that uses Claude Code agents as workers in a MAKER-inspired loop:
 
 ```
 RECALL → DECOMPOSE → VOTE each step (adaptive, ahead-by-K) → COMPOSE → VERIFY → LEARN
@@ -14,7 +14,22 @@ Based on: "Solving a Million-Step LLM Task with Zero Errors" (Meyerson et al., 2
 
 ## Architecture
 
-### Models (configurable at top of swarm.py)
+### Package Structure
+
+```
+swarm/
+├── __init__.py   # Public API exports
+├── __main__.py   # python -m swarm support
+├── config.py     # Constants, models, roles
+├── hooks.py      # register_hook, run_hooks
+├── memory.py     # recall, learn, format_learnings, sessions
+├── agent.py      # claude() wrapper, red_flag()
+├── maker.py      # MAKER loop: decompose, vote, compose, verify, run()
+├── opinion.py    # Parallel diverse opinions + consensus
+└── cli.py        # Argparse CLI entry point
+```
+
+### Models (configurable in config.py)
 | Role | Model | Why |
 |------|-------|-----|
 | Planner (decompose) | Sonnet | Needs intelligence to break tasks well |
@@ -36,25 +51,25 @@ Based on: "Solving a Million-Step LLM Task with Zero Errors" (Meyerson et al., 2
 
 ```bash
 # MAKER mode (default) — for tasks that need reliability
-python3 swarm.py "Design an auth system with JWT" -v
+python -m swarm "Design an auth system with JWT" -v
 
 # Opinion mode — for quick questions / brainstorming
-python3 swarm.py --mode opinion "Best approach for caching?"
+python -m swarm --mode opinion "Best approach for caching?"
 
 # With memory tags
-python3 swarm.py --tags coding,python "Write a rate limiter" -v
+python -m swarm --tags coding,python "Write a rate limiter" -v
 
 # Resume best worker from last run
-python3 swarm.py --resume
+python -m swarm --resume
 
 # Resume specific session with follow-up
-python3 swarm.py --resume <session_id> "Now add refresh tokens"
+python -m swarm --resume <session_id> "Now add refresh tokens"
 
 # List all resumable sessions
-python3 swarm.py --sessions
+python -m swarm --sessions
 
 # Pipe input
-cat spec.md | python3 swarm.py --stdin -v
+cat spec.md | python -m swarm --stdin -v
 ```
 
 ## Memory
@@ -90,17 +105,17 @@ swarm.py can be called from the Go CLI for two purposes:
 ### 1. Inject learnings into lead prompts
 ```bash
 # Get learnings as text (inject into lead assignment)
-LEARNINGS=$(python3 swarm.py --recall --tags coding)
+LEARNINGS=$(python -m swarm --recall --tags coding)
 swarm lead spawn my-lead $SESSION_DIR -a "Do X. $LEARNINGS"
 
 # Get learnings as JSON (parse in Go)
-python3 swarm.py --recall --tags coding --json
+python -m swarm --recall --tags coding --json
 ```
 
 ### 2. Decision consensus before committing
 ```bash
 # Quick opinion poll before a lead commits to an approach
-python3 swarm.py --mode opinion --json "JWT vs sessions for this project?"
+python -m swarm --mode opinion --json "JWT vs sessions for this project?"
 ```
 
 ### 3. Hook into lead workflow

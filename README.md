@@ -2,7 +2,7 @@
 
 Multi-agent collective intelligence for Claude Code.
 
-One Python file. No dependencies beyond the `claude` CLI.
+No dependencies beyond the `claude` CLI.
 
 ## What It Does
 
@@ -17,17 +17,23 @@ Based on [MAKER](https://arxiv.org/abs/2511.09030) — "Solving a Million-Step L
 ## Quick Start
 
 ```bash
+# Install
+pip install -e .
+
 # Design question (opinion mode — fast, 3 parallel agents)
-python3 swarm.py --mode opinion "JWT vs sessions for auth?" -v
+python -m swarm --mode opinion "JWT vs sessions for auth?" -v
 
 # Coding task (MAKER mode — decompose, vote, verify)
-python3 swarm.py --mode maker "Add input validation to swarm.py" -v
+python -m swarm --mode maker "Add input validation" -v
 
 # With tool access (workers can read files, search code)
-python3 swarm.py --mode maker --tools "Read swarm.py and add error logging" -v
+python -m swarm --mode maker --tools "Read the codebase and add error logging" -v
 
 # Read-write tools (workers can edit files — use with caution)
-python3 swarm.py --mode maker --tools-rw "Refactor the red_flag function" -v
+python -m swarm --mode maker --tools-rw "Refactor the red_flag function" -v
+
+# Or use the `swarm` command directly after pip install
+swarm --mode opinion "Best caching strategy?" -v
 ```
 
 ## Two Modes
@@ -107,6 +113,7 @@ This gives 15-25% quality improvement vs temperature variation (~2%). The prompt
 ```bash
 git clone https://github.com/yourname/swarm.git
 cd swarm
+pip install -e .
 ```
 
 Requirements:
