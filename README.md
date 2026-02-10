@@ -1,6 +1,6 @@
 # Swarm
 
-Multi-agent collective intelligence for Claude Code.
+Second opinion machine for Claude Code. Get verification where mistakes are expensive.
 
 No dependencies beyond the `claude` CLI.
 
