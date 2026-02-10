@@ -6,7 +6,7 @@ import os
 import sys
 
 from .agent import claude
-from .config import K_AHEAD, MAX_LOOPS, TIMEOUT_SECONDS
+from .config import MAX_LOOPS, TIMEOUT_SECONDS
 from .maker import run
 from .memory import format_learnings, get_best_session, load_sessions, recall
 
@@ -17,24 +17,22 @@ def main():
         description="Swarm: MAKER-informed multi-agent collective intelligence",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  python -m swarm "Design an auth system" -v
-  python -m swarm --tags coding "Write a rate limiter" -v
-  python -m swarm --mode opinion "Is Rust better than Go?"
-  python -m swarm --resume
-  python -m swarm --sessions""",
+  uv run swarm "Design an auth system" -v
+  uv run swarm --tags coding "Write a rate limiter" -v
+  uv run swarm --mode opinion "Is Rust better than Go?"
+  uv run swarm --resume
+  uv run swarm --sessions""",
     )
     p.add_argument("prompt", nargs="?", help="The task or question")
     p.add_argument("--mode", choices=["maker", "opinion"], default="maker",
                    help="maker=decompose+vote+verify loop (default), opinion=v1 parallel opinions")
     p.add_argument("--workers", type=int, default=3,
                    help="Number of workers for opinion mode (default: 3)")
-    p.add_argument("--worker-model", type=str, default="haiku",
-                   help="Model for workers: haiku (cheap+voting reliable, default) or sonnet")
+    p.add_argument("--worker-model", type=str, default="sonnet",
+                   help="Model for workers: sonnet (default) or haiku")
     p.add_argument("--tags", type=str, default="", help="Comma-separated memory tags")
     p.add_argument("-t", "--timeout", type=int, default=TIMEOUT_SECONDS,
                    help=f"Timeout per agent call (default: {TIMEOUT_SECONDS}s)")
-    p.add_argument("-k", "--k-ahead", type=int, default=K_AHEAD,
-                   help=f"Votes ahead to win (default: {K_AHEAD})")
     p.add_argument("--max-loops", type=int, default=MAX_LOOPS,
                    help=f"Max verify→re-plan loops (default: {MAX_LOOPS})")
     p.add_argument("--tools", action="store_true",
@@ -54,8 +52,6 @@ def main():
                    help="Output past learnings (for injection into other systems)")
     p.add_argument("--recall-limit", type=int, default=10,
                    help="Max learnings to recall (default: 10)")
-    p.add_argument("--max-cost", type=float, default=1.00,
-                   help="Max total cost in USD before stopping. Default: $1.00")
     args = p.parse_args()
 
     # Warn if using read-write tools
@@ -121,8 +117,8 @@ def main():
     try:
         result = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
                                  tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers,
-                                 worker_model=args.worker_model, max_cost=args.max_cost,
-                                 timeout=args.timeout, k_ahead=args.k_ahead, max_loops=args.max_loops,
+                                 worker_model=args.worker_model,
+                                 timeout=args.timeout, max_loops=args.max_loops,
                                  progress=show_progress))
     except KeyboardInterrupt:
         print("\n[interrupted] Shutting down...", file=sys.stderr)

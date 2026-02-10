@@ -1,6 +1,7 @@
 """MAKER loop: decompose, vote, compose, verify, learn."""
 
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -8,14 +9,92 @@ import time
 
 from .agent import claude, red_flag
 from .config import (
-    BATCH_SIZE, K_AHEAD, MAX_LOOPS, MAX_SAMPLES, MODELS, ROLES, TIMEOUT_SECONDS,
+    BATCH_SIZE, CHECKPOINT_INTERVAL, CHECKPOINTS_DIR, K_MAX, K_START,
+    MAX_LOOPS, MAX_SAMPLES, MODELS, ROLES, TIMEOUT_SECONDS,
 )
 from .hooks import run_hooks
 from .memory import format_learnings, learn, recall, save_session
 from .opinion import run_opinion
 
 
-# ── Phase 1: DECOMPOSE ────────────────────────────────────────────────────
+# ── Checkpointing ──────────────────────────────────────────────────────
+
+def _task_hash(task: str) -> str:
+    return hashlib.sha256(task.encode()).hexdigest()[:12]
+
+
+def _save_checkpoint(task: str, step_num: int, step_results: list[dict],
+                     total_cost: float, loop: int):
+    """Save progress every N steps for crash recovery."""
+    d = CHECKPOINTS_DIR / _task_hash(task)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"step_{step_num:06d}.json").write_text(json.dumps({
+        "step_num": step_num,
+        "step_results": step_results,
+        "total_cost": total_cost,
+        "loop": loop,
+    }))
+
+
+def _load_checkpoint(task: str) -> dict | None:
+    """Resume from most recent checkpoint."""
+    d = CHECKPOINTS_DIR / _task_hash(task)
+    if not d.exists():
+        return None
+    checkpoints = sorted(d.glob("step_*.json"), reverse=True)
+    if not checkpoints:
+        return None
+    return json.loads(checkpoints[0].read_text())
+
+
+def _clear_checkpoints(task: str):
+    """Remove checkpoints after successful completion."""
+    d = CHECKPOINTS_DIR / _task_hash(task)
+    if d.exists():
+        for f in d.glob("step_*.json"):
+            f.unlink()
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+
+
+# ── State Compression ──────────────────────────────────────────────────
+
+def _build_context(base_context: str, step_results: list[dict],
+                   compressed_history: list[str]) -> str:
+    """Build context with compressed history + recent full results."""
+    context = base_context
+
+    # Compressed history of older steps
+    if compressed_history:
+        context += "\n\nPrior work (summarized):\n" + "\n".join(compressed_history)
+
+    # Last 5 steps in full detail
+    if step_results:
+        recent = step_results[-5:]
+        prior = "\n".join(f"Step {r['step_num']}: {r['answer'][:500]}"
+                          for r in recent)
+        context += f"\n\nRecent steps (full detail):\n{prior}"
+
+    return context
+
+
+async def _compress_steps(step_results: list[dict], start: int, end: int,
+                          timeout: float) -> tuple[str, float]:
+    """Compress a chunk of step results into a short summary."""
+    chunk = "\n".join(
+        f"Step {r['step_num']}: {r['answer'][:300]}"
+        for r in step_results[start:end]
+    )
+    result = await claude(
+        f"Summarize these step results in 2-3 sentences. Keep key decisions and outputs:\n\n{chunk}",
+        model="haiku", timeout=timeout
+    )
+    return result.get("content", chunk[:200]), result.get("cost", 0)
+
+
+# ── Phase 1: DECOMPOSE ────────────────────────────────────────────────
 
 async def decompose(task: str, learnings_text: str, verbose: bool = False,
                     timeout: float = TIMEOUT_SECONDS) -> tuple[list[str], float]:
@@ -59,7 +138,7 @@ Respond with ONLY a JSON array of step strings. Example:
     return (lines if lines else [task]), cost
 
 
-# ── Phase 2: VOTE per step ───────────────────────────────────────────────
+# ── Phase 2: VOTE per step (escalating K + judge) ─────────────────────
 
 async def vote_step(
     step: str,
@@ -70,11 +149,15 @@ async def vote_step(
     tools: bool = False,
     tools_rw: bool = False,
     cwd: str | None = None,
-    worker_model: str = "haiku",
+    worker_model: str = "sonnet",
     timeout: float = TIMEOUT_SECONDS,
-    k_ahead: int = K_AHEAD,
 ) -> dict:
-    """Adaptive first-to-ahead-by-K voting for a single step."""
+    """Escalating K voting with Opus judge selection.
+
+    Instead of fuzzy consensus checking:
+    1. Generate diverse responses with escalating batches
+    2. Opus judge picks the best one, using majority alignment as a signal
+    """
     batch_size = BATCH_SIZE
     if tools_rw:
         batch_size = 1
@@ -95,6 +178,9 @@ STEP: {step}
 
 Complete ONLY this step. Be specific and concrete.
 At the end, rate your confidence: CONFIDENCE: X/10"""
+
+    # Escalating rounds: K_START responses, then K_START+BATCH_SIZE, up to K_MAX
+    current_k = K_START
 
     while total_sampled < MAX_SAMPLES:
         round_num += 1
@@ -124,58 +210,47 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
                   f"{len(all_responses)} valid, {flagged_count} flagged, "
                   f"{total_sampled} total sampled", file=sys.stderr)
 
-        if len(all_responses) < 2:
-            continue
+        # Once we have enough responses, send to judge
+        if len(all_responses) >= current_k:
+            best, judge_cost = await _judge_responses(all_responses, step, step_num, verbose, timeout)
+            total_cost += judge_cost
 
-        agreement, agreement_cost = await _check_agreement(all_responses, step, k_ahead)
-        total_cost += agreement_cost
-        if agreement:
+            if best is not None:
+                if verbose:
+                    print(f"  [vote step {step_num}] JUDGE PICKED after {total_sampled} samples", file=sys.stderr)
+                return {
+                    "step": step,
+                    "step_num": step_num,
+                    "answer": best.get("content", ""),
+                    "agree_count": len(all_responses),
+                    "total_sampled": total_sampled,
+                    "flagged": flagged_count,
+                    "flagged_reasons": flagged_reasons,
+                    "rounds": round_num,
+                    "session_ids": [r.get("session_id") for r in all_responses if r.get("session_id")],
+                    "cost": total_cost,
+                }
+
+            # Judge said none are good enough — escalate K
+            current_k = min(current_k + BATCH_SIZE, K_MAX)
             if verbose:
-                print(f"  [vote step {step_num}] CONSENSUS after {total_sampled} samples "
-                      f"({agreement['agree_count']}/{len(all_responses)} agree)", file=sys.stderr)
-            return {
-                "step": step,
-                "step_num": step_num,
-                "answer": agreement["merged"],
-                "agree_count": agreement["agree_count"],
-                "total_sampled": total_sampled,
-                "flagged": flagged_count,
-                "flagged_reasons": flagged_reasons,
-                "rounds": round_num,
-                "session_ids": [r.get("session_id") for r in all_responses if r.get("session_id")],
-                "cost": total_cost,
-            }
+                print(f"  [vote step {step_num}] Judge wants more options, escalating to K={current_k}", file=sys.stderr)
 
-    # Fallback: no K-agreement — use Sonnet tiebreaker if workers were Haiku
+    # Exhausted MAX_SAMPLES — judge picks from what we have
     if verbose:
-        print(f"  [vote step {step_num}] NO CONSENSUS after {MAX_SAMPLES} samples.", file=sys.stderr)
+        print(f"  [vote step {step_num}] MAX SAMPLES reached. Judge picks from {len(all_responses)} responses.", file=sys.stderr)
 
-    if all_responses and worker_model != "sonnet":
-        if verbose:
-            print(f"  [vote step {step_num}] Escalating to Sonnet tiebreaker...", file=sys.stderr)
-        responses_text = "\n\n---\n\n".join(
-            f"RESPONSE {i+1}:\n{r.get('content', '')[:1500]}"
-            for i, r in enumerate(all_responses)
-        )
-        judge_result = await claude(
-            f"Step: {step}\n\nPick the BEST response (most correct, complete, actionable). "
-            f"Output ONLY the response number (1-{len(all_responses)}).\n\n{responses_text}",
-            model="sonnet", system="You are a strict judge. Pick the single best response.",
-            timeout=timeout)
-        total_cost += judge_result.get("cost", 0)
-        try:
-            pick_idx = int(judge_result.get("content", "").strip().split()[0]) - 1
-            best = all_responses[max(0, min(pick_idx, len(all_responses) - 1))]
-        except (ValueError, IndexError):
-            best = max(all_responses, key=lambda r: len(r.get("content", "")))
+    if all_responses:
+        best, judge_cost = await _judge_responses(all_responses, step, step_num, verbose, timeout, force=True)
+        total_cost += judge_cost
+        answer = best.get("content", "") if best else all_responses[0].get("content", "")
     else:
-        print(f"[vote step {step_num}] WARNING: Fallback to longest response (no consensus)", file=sys.stderr)
-        best = max(all_responses, key=lambda r: len(r.get("content", ""))) if all_responses else {"content": ""}
+        answer = ""
 
     return {
         "step": step,
         "step_num": step_num,
-        "answer": best.get("content", ""),
+        "answer": answer,
         "agree_count": 1,
         "total_sampled": total_sampled,
         "flagged": flagged_count,
@@ -186,47 +261,84 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
     }
 
 
-async def _check_agreement(responses: list[dict], step: str, k: int) -> tuple[dict | None, float]:
-    """Ask cheap model if K+ responses substantively agree."""
-    summaries = "\n---\n".join(
-        f"Response {i+1}:\n{r['content'][:1500]}"
+async def _judge_responses(responses: list[dict], step: str, step_num: int,
+                           verbose: bool, timeout: float,
+                           force: bool = False) -> tuple[dict | None, float]:
+    """Opus judge evaluates all responses and picks the best one.
+
+    Majority alignment is a signal, not a requirement.
+    Returns (best_response, cost) or (None, cost) if judge wants more options.
+    """
+    responses_text = "\n\n---\n\n".join(
+        f"RESPONSE {i+1}:\n{r.get('content', '')[:2000]}"
         for i, r in enumerate(responses)
     )
 
-    check_prompt = f"""Step being executed: {step}
+    force_clause = "You MUST pick one." if force else (
+        "If ALL responses are low quality or fundamentally flawed, respond PICK: NONE to request more samples."
+    )
 
-Here are {len(responses)} responses:
+    judge_prompt = f"""You are judging {len(responses)} responses for this step:
 
-{summaries}
+STEP: {step}
 
-How many of these responses substantively agree on the approach and answer?
-Reply in this EXACT format:
+{responses_text}
 
-AGREE_COUNT: <number>
-AGREE_INDICES: <comma-separated indices of agreeing responses, 1-based>
-MERGED: <if AGREE_COUNT >= {k}, merge the agreeing responses into one clean answer. Otherwise write NONE>"""
+Evaluate each response on: correctness, completeness, actionability.
+Note which responses agree with each other (majority alignment = good signal, but a brilliant minority answer can win).
 
-    result = await claude(check_prompt, model="haiku",
-                          system="You are a concise evaluator. Count agreement precisely.")
+{force_clause}
+
+Reply in this format:
+REASONING: <1-2 sentences on why you picked this one>
+PICK: <number 1-{len(responses)}, or NONE>"""
+
+    result = await claude(judge_prompt, model=MODELS["judge"],
+                          system="You are an expert judge. Pick the single best response. Quality over popularity.",
+                          timeout=timeout)
     cost = result.get("cost", 0)
     text = result.get("content", "")
 
-    count_match = re.search(r"AGREE_COUNT:\s*(\d+)", text)
-    if not count_match:
+    pick_match = re.search(r"PICK:\s*(\d+|NONE)", text, re.IGNORECASE)
+    if not pick_match or pick_match.group(1).upper() == "NONE":
         return None, cost
 
-    agree_count = int(count_match.group(1))
-    if agree_count < k:
-        return None, cost
-
-    merged_match = re.search(r"MERGED:\s*(.+)", text, re.DOTALL)
-    if not merged_match or merged_match.group(1).strip().upper() == "NONE":
-        return None, cost
-
-    return {"agree_count": agree_count, "merged": merged_match.group(1).strip()}, cost
+    try:
+        idx = int(pick_match.group(1)) - 1
+        return responses[max(0, min(idx, len(responses) - 1))], cost
+    except (ValueError, IndexError):
+        return responses[0] if responses else None, cost
 
 
-# ── Phase 3: COMPOSE ──────────────────────────────────────────────────────
+# ── Phase 2.5: PER-STEP VERIFICATION ──────────────────────────────────
+
+async def _verify_step(step: str, answer: str, step_num: int,
+                       verbose: bool, timeout: float) -> tuple[bool, str, float]:
+    """Quick per-step verification. Catches errors before they cascade."""
+    verify_prompt = f"""Step: {step}
+
+Answer: {answer[:2000]}
+
+Does this answer correctly and completely address the step?
+Reply: STEP_OK or STEP_ISSUE: <brief description of the problem>"""
+
+    result = await claude(verify_prompt, model=MODELS["verifier"],
+                          system="Strict step validator. Only STEP_OK if genuinely correct.",
+                          timeout=timeout)
+    cost = result.get("cost", 0)
+    text = result.get("content", "")
+
+    if "STEP_OK" in text:
+        return True, "", cost
+
+    issue_match = re.search(r"STEP_ISSUE:\s*(.+)", text, re.DOTALL)
+    issue = issue_match.group(1).strip()[:200] if issue_match else "Unknown issue"
+    if verbose:
+        print(f"  [verify step {step_num}] ISSUE: {issue}", file=sys.stderr)
+    return False, issue, cost
+
+
+# ── Phase 3: COMPOSE ──────────────────────────────────────────────────
 
 async def compose(task: str, step_results: list[dict], verbose: bool = False,
                   timeout: float = TIMEOUT_SECONDS) -> tuple[str, float]:
@@ -258,7 +370,7 @@ Preserve all important details. Remove redundancy. Make it flow naturally."""
     return result.get("content", "") or steps_block, cost
 
 
-# ── Phase 4: VERIFY ──────────────────────────────────────────────────────
+# ── Phase 4: VERIFY ──────────────────────────────────────────────────
 
 async def verify(task: str, answer: str, verbose: bool = False,
                  timeout: float = TIMEOUT_SECONDS) -> dict:
@@ -304,7 +416,7 @@ The LEARNING field is MANDATORY. Use one of these exact categories: mistake, str
     }
 
 
-# ── Orchestrator: The MAKER Loop ─────────────────────────────────────────
+# ── Orchestrator: The MAKER Loop ─────────────────────────────────────
 
 def _progress(msg: str, verbose: bool, progress: bool) -> None:
     """Print progress message if progress or verbose mode is on."""
@@ -315,8 +427,8 @@ def _progress(msg: str, verbose: bool, progress: bool) -> None:
 async def run(task: str, tags: list[str] | None = None,
               verbose: bool = False, mode: str = "maker",
               tools: bool = False, tools_rw: bool = False, cwd: str | None = None,
-              workers: int = 3, worker_model: str = "haiku", max_cost: float = 1.00,
-              timeout: float = TIMEOUT_SECONDS, k_ahead: int = K_AHEAD, max_loops: int = MAX_LOOPS,
+              workers: int = 3, worker_model: str = "sonnet",
+              timeout: float = TIMEOUT_SECONDS, max_loops: int = MAX_LOOPS,
               progress: bool = False) -> dict:
     """Main entry point.
 
@@ -329,7 +441,7 @@ async def run(task: str, tags: list[str] | None = None,
 
     t0 = time.monotonic()
     total_cost = 0
-    answer = ""  # Initialize before loop to avoid NameError on early cost ceiling hit
+    answer = ""  # Initialize before loop to avoid NameError on early exit
 
     # 1. RECALL
     _progress("[1/6] Recalling learnings...", verbose, progress)
@@ -338,13 +450,19 @@ async def run(task: str, tags: list[str] | None = None,
     if verbose and learnings:
         print(f"\n[recall] Loaded {len(learnings)} learnings", file=sys.stderr)
 
-    for loop in range(max_loops):
-        if total_cost > max_cost:
-            if verbose:
-                print(f"\n[cost-limit] WARNING: Total cost ${round(total_cost, 3)} exceeds limit ${max_cost}. "
-                      f"Returning best answer so far.", file=sys.stderr)
-            return {"answer": answer, "cost": total_cost}
+    # Check for resumable checkpoint
+    checkpoint = _load_checkpoint(task)
+    resume_step = 0
+    resumed_results = []
+    if checkpoint:
+        resume_step = checkpoint["step_num"] + 1
+        resumed_results = checkpoint["step_results"]
+        total_cost = checkpoint["total_cost"]
+        if verbose:
+            print(f"\n[resume] Found checkpoint at step {checkpoint['step_num']}. "
+                  f"Resuming from step {resume_step}.", file=sys.stderr)
 
+    for loop in range(max_loops):
         if verbose:
             print(f"\n{'='*60}", file=sys.stderr)
             print(f"[loop {loop+1}/{max_loops}]", file=sys.stderr)
@@ -374,19 +492,23 @@ async def run(task: str, tags: list[str] | None = None,
         if learnings_text:
             base_context += f"\n\n{learnings_text}"
 
-        # 3. VOTE each step
+        # 3. VOTE each step (with per-step verification + checkpointing)
         _progress(f"[3/6] Voting on {len(steps)} steps...", verbose, progress)
-        step_results = []
-        for i, step in enumerate(steps):
+        step_results = resumed_results if (loop == 0 and resumed_results) else []
+        compressed_history = []
+        start_step = resume_step if (loop == 0 and resumed_results) else 0
+        # Clear resume state after first use
+        if loop == 0:
+            resume_step = 0
+            resumed_results = []
+
+        for i in range(start_step, len(steps)):
+            step = steps[i]
             _progress(f"  Step {i+1}/{len(steps)}", verbose, progress)
             if verbose:
                 print(f"\n[step {i+1}/{len(steps)}] Voting on: {step[:80]}...", file=sys.stderr)
 
-            context = base_context
-            if step_results:
-                prior = "\n".join(f"Step {r['step_num']} result: {r['answer'][:300]}"
-                                  for r in step_results)
-                context += f"\n\nPrior step results:\n{prior}"
+            context = _build_context(base_context, step_results, compressed_history)
 
             overrides = await run_hooks("pre_vote", {"step": step, "step_num": i + 1,
                                                        "total_steps": len(steps), "context": context,
@@ -394,14 +516,30 @@ async def run(task: str, tags: list[str] | None = None,
             step = overrides.get("step", step)
             step_worker_model = overrides.get("worker_model", worker_model)
 
+            # Vote with judge selection
             result = await vote_step(step, i + 1, len(steps), context,
                                     verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd,
-                                    worker_model=step_worker_model, timeout=timeout, k_ahead=k_ahead)
+                                    worker_model=step_worker_model, timeout=timeout)
 
             overrides = await run_hooks("post_vote", {"step": step, "step_num": i + 1,
                                                        "result": result})
             if "result" in overrides:
                 result = overrides["result"]
+
+            # Per-step verification — catch errors immediately
+            step_ok, step_issue, verify_cost = await _verify_step(
+                step, result["answer"], i + 1, verbose, timeout)
+            total_cost += verify_cost
+
+            if not step_ok:
+                # Retry this step once with the issue as feedback
+                if verbose:
+                    print(f"  [step {i+1}] Re-voting with feedback: {step_issue}", file=sys.stderr)
+                feedback_context = context + f"\n\nPREVIOUS ATTEMPT ISSUE: {step_issue}\nFix this issue."
+                result = await vote_step(step, i + 1, len(steps), feedback_context,
+                                        verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd,
+                                        worker_model=step_worker_model, timeout=timeout)
+                total_cost += result.get("cost", 0)
 
             step_results.append(result)
             total_cost += result.get("cost", 0)
@@ -409,6 +547,23 @@ async def run(task: str, tags: list[str] | None = None,
             for sid in result.get("session_ids", []):
                 if sid:
                     save_session(f"step-{i+1}", sid, step, 7.0, tags)
+
+            # Checkpoint every N steps
+            if (i + 1) % CHECKPOINT_INTERVAL == 0:
+                _save_checkpoint(task, i, step_results, total_cost, loop)
+                if verbose:
+                    print(f"  [checkpoint] Saved at step {i+1}", file=sys.stderr)
+
+            # Compress older steps to keep context manageable
+            if len(step_results) > 5 and len(step_results) % 10 == 0:
+                chunk_end = len(step_results) - 5
+                chunk_start = max(0, chunk_end - 10)
+                summary, compress_cost = await _compress_steps(
+                    step_results, chunk_start, chunk_end, timeout)
+                total_cost += compress_cost
+                compressed_history.append(f"Steps {chunk_start+1}-{chunk_end}: {summary}")
+                if verbose:
+                    print(f"  [compress] Compressed steps {chunk_start+1}-{chunk_end}", file=sys.stderr)
 
         if verbose:
             total_votes = sum(r["total_sampled"] for r in step_results)
@@ -465,6 +620,7 @@ async def run(task: str, tags: list[str] | None = None,
                                         "task": task, "loop": loop})
 
         if verification["passed"]:
+            _clear_checkpoints(task)
             elapsed = round(time.monotonic() - t0, 2)
             if verbose:
                 total_cost_display = round(total_cost, 3)
@@ -484,6 +640,7 @@ async def run(task: str, tags: list[str] | None = None,
         learnings_text = format_learnings(learnings)
 
     # Exhausted all loops
+    _clear_checkpoints(task)
     elapsed = round(time.monotonic() - t0, 2)
     if verbose:
         total_cost_display = round(total_cost, 3)
