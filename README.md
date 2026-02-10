@@ -7,9 +7,9 @@ No dependencies beyond the `claude` CLI.
 ## What It Does
 
 ```
-RECALL → DECOMPOSE → VOTE each step (adaptive K-ahead) → COMPOSE → VERIFY → LEARN
-  ↑                                                                              |
-  └──────────────────── re-plan with learnings if verify fails ──────────────────┘
+RECALL → DECOMPOSE → VOTE each step (escalating K + judge) → COMPOSE → VERIFY → LEARN
+  ↑                                                                                  |
+  └──────────────────────── re-plan with learnings if verify fails ─────────────────┘
 ```
 
 Based on [MAKER](https://arxiv.org/abs/2511.09030) — "Solving a Million-Step LLM Task with Zero Errors" (Meyerson et al., 2025).
@@ -24,10 +24,10 @@ uv run swarm --mode opinion "JWT vs sessions for auth?" -v
 uv run swarm --mode maker "Add input validation" -v
 
 # With tool access (workers can read files, search code)
-uv run swarm --mode maker --tools "Read the codebase and add error logging" -v
+uv run swarm --mode maker --tools "Review the auth flow for vulnerabilities" -v
 
 # Read-write tools (workers can edit files — use with caution)
-uv run swarm --mode maker --tools-rw "Refactor the red_flag function" -v
+uv run swarm --mode maker --tools-rw "Refactor the error handling" -v
 ```
 
 ## Two Modes
@@ -36,7 +36,7 @@ uv run swarm --mode maker --tools-rw "Refactor the red_flag function" -v
 3 diverse agents answer in parallel → consensus check → judge if needed. Fast. Good for design questions and trade-offs.
 
 ### MAKER Mode (`--mode maker`, default)
-Sonnet decomposes → Haiku workers vote each step (K-ahead) → Sonnet composes → Sonnet verifies → learn → retry if failed. Reliable. Good for tasks where correctness matters.
+Opus decomposes → Sonnet workers generate diverse responses → Opus judge picks best → Opus verifies → learn → retry if failed. Reliable. Good for tasks where correctness matters.
 
 ## Key Flags
 
@@ -49,33 +49,25 @@ Sonnet decomposes → Haiku workers vote each step (K-ahead) → Sonnet composes
 | `--cwd PATH` | Working directory for workers |
 | `--tags x,y` | Memory tags for recall/learn |
 | `-v` | Verbose progress output |
-| `-k N` | Votes ahead to win (default: 3) |
 | `-t N` | Timeout per agent call in seconds (default: 120) |
-| `--worker-model MODEL` | Model for workers: haiku (default) or sonnet |
-| `--max-cost N` | Max total cost in USD before stopping (default: 1.00) |
+| `--worker-model MODEL` | Model for workers: sonnet (default) or haiku |
 | `--max-loops N` | Max verify-replan loops (default: 3) |
 | `--json` | Output result as JSON |
 | `--resume [ID]` | Resume a worker session (default: best from last run) |
 | `--sessions` | List resumable sessions |
-
-## Memory
-
-Learnings stored in `~/.swarm/learnings.jsonl`. Append-only JSONL.
-
-- Before each run: `recall()` injects relevant past learnings into agent prompts
-- After verify: `learn()` extracts `LEARNING: [category] content` from output
-- Categories: mistake, strategy, pattern, constraint
-- Confidence-sorted, tag-filtered retrieval
+| `--recall` | Output past learnings for injection into other systems |
 
 ## How It Works
 
-### MAKER Voting (the core insight)
+### Judge-Based Selection (not consensus voting)
 
-At each step, multiple cheap workers (Haiku) attempt the same task with different role prompts. Sampling continues until one answer leads by K votes. This is **not** majority voting — it's an adaptive stopping rule.
+At each step, multiple workers (Sonnet) attempt the same task with different role prompts. An Opus judge evaluates all responses and picks the best one — using majority alignment as a quality signal, not a requirement. A brilliant minority answer can win over a mediocre majority.
 
-- K=3 was sufficient for 1,048,575 sequential steps with zero errors (MAKER paper)
-- Red-flagging discards structurally suspicious responses before they pollute votes
-- Cost scales log-linearly: `O(s ln s)`, not exponentially
+If the judge wants more options, K escalates automatically (2 → 3 → 5). Easy steps converge fast. Hard steps get more samples.
+
+### Per-Step Verification
+
+Each step is verified immediately after the judge picks. If the verifier catches an issue, the step is retried with the feedback. Errors are caught before they cascade — not after all steps complete.
 
 ### Role Diversity
 
@@ -89,18 +81,33 @@ This gives 15-25% quality improvement vs temperature variation (~2%). The prompt
 | Role | Model | Why |
 |------|-------|-----|
 | Planner | Opus | Best judgment to decompose well |
-| Worker | Sonnet | Smarter workers — voting makes them even more reliable |
+| Worker | Sonnet | Smart enough for quality, voting adds reliability |
+| Judge | Opus | Expert evaluation > democratic consensus |
 | Composer | Opus | Coherent synthesis |
 | Verifier | Opus | Best judgment to catch issues |
 
+### Crash Recovery
+
+Progress is checkpointed every 10 steps. If a run crashes at step 50, resume loses at most 10 steps of work — not all 50.
+
+## Memory
+
+Learnings stored in `~/.swarm/learnings.jsonl`. Append-only JSONL.
+
+- Before each run: `recall()` injects relevant past learnings into agent prompts
+- After verify: `learn()` extracts `LEARNING: [category] content` from output
+- Categories: mistake, strategy, pattern, constraint
+- Confidence-sorted, tag-filtered retrieval
+
 ## Principles
 
-1. **Cheap models + voting > expensive models solo**
-2. **Decompose before you swarm** — vote per step, not per task
-3. **Red-flag before counting** — discard bad responses, don't try to fix them
-4. **Separate planning from execution** — different models for different jobs
-5. **Memory compounds** — one agent with learnings beats 10 without
-6. **Diversity via roles, not temperature**
+1. **An expert judge beats a democratic vote** — majority alignment is a signal, not a mechanism
+2. **Catch errors early** — per-step verification beats post-hoc checking
+3. **Decompose before you swarm** — vote per step, not per task
+4. **Red-flag before judging** — discard bad responses, don't try to fix them
+5. **Separate planning from execution** — different models for different jobs
+6. **Memory compounds** — one agent with learnings beats 10 without
+7. **Diversity via roles, not temperature**
 
 ## Installation
 
@@ -134,6 +141,7 @@ uv run swarm --help
 All data is stored in `~/.swarm/`:
 - `learnings.jsonl` — Accumulated learnings (append-only JSONL)
 - `sessions.jsonl` — Resumable worker sessions
+- `checkpoints/` — Mid-run progress for crash recovery
 
 This directory is created automatically on first run.
 
@@ -141,11 +149,14 @@ This directory is created automatically on first run.
 
 This is a **MAKER-inspired** system adapted for open-ended reasoning tasks. Key differences from the original paper:
 
-- **Agreement checking**: Uses LLM-based semantic consensus instead of exact string matching (necessary because open-ended tasks have no deterministic ground truth)
-- **Verification**: Sonnet verifier + retry loop instead of rule-based correctness checking
+- **Selection**: Opus judge picks best response instead of exact string consensus (necessary because open-ended tasks have no deterministic ground truth)
+- **Verification**: Per-step Opus verification + retry instead of rule-based correctness checking
+- **State**: Compressed history + recent context window instead of formal state tracking
 - **Decomposition**: Tasks are broken into reasoning steps, not mechanical moves
 
-The core principles (decompose, vote with K-ahead, red-flag, learn) are preserved. See [the paper](https://arxiv.org/abs/2511.09030) for the original formulation.
+The core principles (decompose, diverse generation, red-flag, learn) are preserved. The mathematical guarantee (`P(correct) → 1` as K increases) becomes approximate rather than exact — reliability compounds through judge quality + role diversity + learning, but without formal proof.
+
+See [the paper](https://arxiv.org/abs/2511.09030) for the original formulation.
 
 ## License
 

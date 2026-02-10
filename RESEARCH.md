@@ -82,40 +82,46 @@ K grows with ln(s). This is why it's practical.
 
 ---
 
-## Applied to Our Swarm (v2 implementation)
+## Applied to Our Swarm (v3 — judge-based architecture)
 
 ### What we implemented from MAKER:
 
-1. **Decompose → Vote → Compose → Verify → Learn loop**
-   - Sonnet decomposes task into atomic steps
-   - Haiku executes each step with adaptive K-ahead voting
-   - Sonnet composes results and verifies
+1. **Decompose → Vote → Judge → Compose → Verify → Learn loop**
+   - Opus decomposes task into atomic steps
+   - Sonnet workers generate diverse responses per step
+   - Opus judge picks the best response (majority alignment = signal, not law)
+   - Opus composes results and verifies
    - Learnings feed back if verification fails
 
-2. **Red-flagging before vote counting**
+2. **Red-flagging before judging**
    - Discard: empty, too long (>3000 chars), low confidence (<3/10), errors
    - Reduces correlated failures without extra cost
 
-3. **Adaptive voting (not fixed N)**
-   - Batch 3 workers per round, check agreement
-   - Keep sampling until K=3 agree or MAX_SAMPLES hit
-   - Agreement checked by cheap Haiku call
+3. **Escalating K (not fixed)**
+   - Start with K=2 workers, escalate to K=3, then K=5 if judge wants more
+   - Easy steps converge at K=2 (fast). Hard steps get more samples (reliable)
+   - No classifier needed — judge naturally drives escalation
 
 4. **Separate planning from execution**
-   - Sonnet plans (decompose), Haiku executes (vote steps)
-   - Different models for different cognitive loads
+   - Opus plans (decompose) + judges + verifies
+   - Sonnet executes (vote steps)
 
-### What we adapted (paper had verifiable correctness, we don't):
+### What we evolved beyond the paper:
 
-5. **Agreement ≠ exact match for open-ended tasks**
+5. **Judge replaces consensus**
    - Paper: exact string match for Hanoi moves
-   - Us: cheap LLM checks "do these responses substantively agree?"
-   - Weaker guarantee, but still compounds reliability
+   - Us: Opus judge evaluates quality and picks best response
+   - Stronger than fuzzy consensus — judge can pick a brilliant minority answer
 
-6. **Verify loop instead of ground truth**
-   - Paper: could check each move against rules
-   - Us: Sonnet verifier checks final answer against original task
-   - If fails: learn from failure, re-decompose, retry (max 3 loops)
+6. **Per-step verification**
+   - Paper: verified after every move (deterministic)
+   - Us: Opus verifies each step immediately, retries with feedback if failed
+   - Errors caught before cascading — not after all steps complete
+
+7. **State compression + checkpointing**
+   - Older steps compressed into summaries, last 5 kept in full
+   - Checkpoint every 10 steps for crash recovery
+   - Enables 100+ step runs without context overflow
 
 ---
 
