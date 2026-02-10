@@ -14,7 +14,14 @@ Three agents think about your question at the same time. A pragmatist looking fo
 
 If they agree, you know you're on solid ground. If they disagree, thats actually where the good stuff is. The trade-offs nobody mentioned. The edge case the pragmatist glossed over that the skeptic caught.
 
-No install. No dependencies. No Python. Just a Claude Code skill.
+## Install
+
+```bash
+claude plugin marketplace add juliuschun/swarm
+claude plugin install swarm@swarm-marketplace
+```
+
+Then restart Claude Code. Thats it.
 
 ## Why bother
 
@@ -31,9 +38,14 @@ Answer:       The synthesized recommendation
 Agreed on:    Points all three landed on (high confidence)
 Differed on:  Trade-offs and the minority insight you'd have missed
 Confidence:   How much they aligned
+Objectives:   Concrete next steps, ready to execute
 ```
 
 The disagreements are usually the best part. When the skeptic flags something the pragmatist skipped, thats the blind spot you were about to ship with.
+
+But swarm doesnt stop at opinions. It slices the recommendation into concrete objectives — specific, ordered, actionable — and then your main agent starts working through them. After execution, a reviewer agent checks the work against the original question. If something's off, it gets fixed before you move on.
+
+Opinions without action are just talk. Swarm gives you the plan, carries it out, and checks its own work.
 
 ## Real examples
 
@@ -69,7 +81,7 @@ If the cost of being wrong is 10x the cost of asking, swarm it. Otherwise dont.
 
 Swarm saves insights between runs to `~/.swarm/learnings.jsonl`. Next time you ask something related, those learnings show up in the agent prompts automatically.
 
-Stuff that keeps proving useful floats to the top. Stale insights sink. An agent with 30 confirmed learnings does better work than ten agents starting blank.
+Stuff that keeps proving useful floats to the top. When a recalled learning contributes to a good result, its score goes up. Stale insights naturally sink. An agent with 30 confirmed learnings does better work than ten agents starting blank.
 
 ## The three roles
 
@@ -85,11 +97,14 @@ For harder questions add two more: an **Innovator** for unconventional approache
 
 One skill file. Thats it. `skills/swarm/SKILL.md` tells Claude Code to:
 
-1. Check for past learnings that might be relevant
+1. Recall past learnings that might be relevant
 2. Spawn 3 agents in parallel with different role prompts
-3. See if they agree
+3. Drop any bad responses (empty, refusals, low confidence)
 4. Merge or synthesize depending on consensus
-5. Save anything worth remembering
+5. Slice the answer into concrete, ordered objectives
+6. Execute those objectives
+7. Verify the work with a reviewer agent
+8. Confirm useful learnings, save new ones
 
 Claude Code's Task tool handles the parallelism natively. No subprocess management, no orchestration framework, no extra moving parts.
 

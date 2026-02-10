@@ -17,14 +17,18 @@ legacy/                  Old Python CLI (gitignored, kept for reference).
 
 ```
 /swarm "your question"
-  → Check ~/.swarm/learnings.jsonl for relevant past insights
+  → Recall past learnings (ranked by times_confirmed)
   → Spawn 3 agents in parallel (pragmatist, skeptic, systems thinker)
-  → Compare their responses
-  → If they agree: merge, keep each one's best insight
-  → If they disagree: synthesize, highlight the trade-offs
-  → Save anything worth remembering
-  → Show the user one structured answer
+  → Sanity check responses (drop empty, refusals, low confidence)
+  → Check consensus → merge or synthesize
+  → Slice into concrete, ordered objectives
+  → Present answer + objectives to user
+  → Execute objectives
+  → Verify with a reviewer agent (fix if needed)
+  → Confirm useful learnings, save new ones
 ```
+
+Two things set this apart from a plain opinion tool. First, it doesnt stop at advice — it slices the answer into objectives and executes them. Second, it verifies the work after execution by spawning a reviewer agent that checks against the original question. Opinions flow into action, action gets checked.
 
 All of this runs through Claude Code's Task tool. No Python, no subprocess, nothing external.
 
@@ -33,9 +37,13 @@ All of this runs through Claude Code's Task tool. No Python, no subprocess, noth
 `skills/swarm/SKILL.md` is the whole product. Markdown with YAML frontmatter. Claude Code loads it when someone types `/swarm`. Inside:
 
 - Role prompts for each agent
-- Memory instructions (read/write learnings.jsonl)
+- Sanity check (drop bad responses before synthesis)
+- Memory instructions (read/write/confirm learnings.jsonl)
 - Consensus logic (merge vs synthesize)
-- Output structure (answer, agreements, disagreements, confidence)
+- Objective decomposition (answer → concrete next steps)
+- Execution (main agent works through objectives)
+- Verification (reviewer agent checks the work)
+- Output structure (answer, agreements, disagreements, confidence, objectives)
 
 ### Agents
 
@@ -61,6 +69,8 @@ Append-only JSONL at `~/.swarm/learnings.jsonl`:
 
 **Recall**: sorted by `times_confirmed` desc, then `confidence` desc. Top 5 active entries go into agent prompts. Useful stuff rises. Stale stuff sinks.
 
+**Confirmation**: After a successful run, learnings that were recalled get their `times_confirmed` bumped. This is how the ranking system actually works — learnings prove themselves through repeated use.
+
 **Categories**: `mistake` (dont repeat this), `strategy` (this worked), `pattern` (keep seeing this), `constraint` (hard limit to respect).
 
 ## Principles
@@ -71,7 +81,9 @@ Append-only JSONL at `~/.swarm/learnings.jsonl`:
 
 3. **Memory compounds.** An agent with 30 confirmed learnings beats ten fresh agents. Every time.
 
-4. **Opinions not truth.** Always present as "heres what multiple experts concluded." Never as the answer.
+4. **Opinions into action.** Dont stop at advice. Slice the recommendation into objectives and start executing. The user asked for help, not a report.
+
+5. **Opinions not truth.** Always present as "heres what multiple experts concluded." Never as the answer.
 
 ## When to trigger
 
