@@ -5,9 +5,6 @@
   "author": {
     "name": "Julius"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/juliuschun/swarm.git"
-  },
+  "repository": "https://github.com/juliuschun/swarm",
   "license": "MIT"
 }
