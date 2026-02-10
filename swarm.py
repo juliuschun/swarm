@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import sys
 import time
 import uuid
@@ -54,6 +55,46 @@ ROLES = [
     "You are a historian. What has worked or failed before in similar situations?",
     "You are a contrarian. Argue against the obvious answer. Find the hidden truth.",
 ]
+
+
+# ── Hooks ──────────────────────────────────────────────────────────────────
+
+# Hook points in the MAKER loop. Register callables to extend behavior.
+# Hooks are async functions that receive context and return a dict of overrides.
+# Hook points: pre_decompose, post_decompose, pre_vote, post_vote,
+#              pre_compose, post_compose, pre_verify, post_verify, post_learn, post_loop
+
+_hooks: dict[str, list] = {}
+
+
+def register_hook(point: str, fn) -> None:
+    """Register a hook function for a given point in the MAKER loop.
+
+    Hook functions are async callables that receive a context dict and return
+    a dict of overrides. Returning an empty dict means no changes.
+
+    Example:
+        async def my_hook(ctx):
+            print(f"Step {ctx.get('step_num')} done")
+            return {}
+        register_hook("post_vote", my_hook)
+    """
+    if point not in _hooks:
+        _hooks[point] = []
+    _hooks[point].append(fn)
+
+
+async def run_hooks(point: str, ctx: dict) -> dict:
+    """Run all hooks for a given point, merging returned overrides."""
+    result = {}
+    for fn in _hooks.get(point, []):
+        try:
+            override = await fn(ctx) if asyncio.iscoroutinefunction(fn) else fn(ctx)
+            if isinstance(override, dict):
+                result.update(override)
+        except Exception as e:
+            print(f"[hook:{point}] {fn.__name__} failed: {e}", file=sys.stderr)
+    return result
 
 
 # ── Memory ─────────────────────────────────────────────────────────────────
@@ -407,11 +448,32 @@ At the end, rate your confidence: CONFIDENCE: X/10"""
                 "cost": total_cost,
             }
 
-    # Fallback: no K-agreement reached, use longest response
+    # Fallback: no K-agreement reached — use Sonnet tiebreaker if workers were Haiku
     if verbose:
-        print(f"  [vote step {step_num}] NO CONSENSUS after {MAX_SAMPLES} samples. Using best response.", file=sys.stderr)
-    print(f"[vote step {step_num}] WARNING: Fallback to single-response mode (no consensus reached)", file=sys.stderr)
-    best = max(all_responses, key=lambda r: len(r.get("content", ""))) if all_responses else {"content": ""}
+        print(f"  [vote step {step_num}] NO CONSENSUS after {MAX_SAMPLES} samples.", file=sys.stderr)
+
+    if all_responses and worker_model != "sonnet":
+        if verbose:
+            print(f"  [vote step {step_num}] Escalating to Sonnet tiebreaker...", file=sys.stderr)
+        responses_text = "\n\n---\n\n".join(
+            f"RESPONSE {i+1}:\n{r.get('content', '')[:1500]}"
+            for i, r in enumerate(all_responses)
+        )
+        judge_result = await claude(
+            f"Step: {step}\n\nPick the BEST response (most correct, complete, actionable). "
+            f"Output ONLY the response number (1-{len(all_responses)}).\n\n{responses_text}",
+            model="sonnet", system="You are a strict judge. Pick the single best response.",
+            timeout=timeout)
+        total_cost += judge_result.get("cost", 0)
+        try:
+            pick_idx = int(judge_result.get("content", "").strip().split()[0]) - 1
+            best = all_responses[max(0, min(pick_idx, len(all_responses) - 1))]
+        except (ValueError, IndexError):
+            best = max(all_responses, key=lambda r: len(r.get("content", "")))
+    else:
+        print(f"[vote step {step_num}] WARNING: Fallback to longest response (no consensus)", file=sys.stderr)
+        best = max(all_responses, key=lambda r: len(r.get("content", ""))) if all_responses else {"content": ""}
+
     return {
         "step": step,
         "step_num": step_num,
@@ -542,11 +604,18 @@ The LEARNING field is MANDATORY. Use one of these exact categories: mistake, str
 
 # ── Orchestrator: The MAKER Loop ──────────────────────────────────────────
 
+def _progress(msg: str, verbose: bool, progress: bool) -> None:
+    """Print progress message if progress or verbose mode is on."""
+    if verbose or progress:
+        print(msg, file=sys.stderr, flush=True)
+
+
 async def run(task: str, tags: list[str] | None = None,
               verbose: bool = False, mode: str = "maker",
               tools: bool = False, tools_rw: bool = False, cwd: str | None = None,
               workers: int = 3, worker_model: str = "haiku", max_cost: float = 1.00,
-              timeout: float = TIMEOUT_SECONDS, k_ahead: int = K_AHEAD, max_loops: int = MAX_LOOPS) -> str:
+              timeout: float = TIMEOUT_SECONDS, k_ahead: int = K_AHEAD, max_loops: int = MAX_LOOPS,
+              progress: bool = False) -> dict:
     """Main entry point.
 
     mode="maker": decompose → vote per step → compose → verify → learn → loop
@@ -561,6 +630,7 @@ async def run(task: str, tags: list[str] | None = None,
     answer = ""  # Initialize before loop to avoid NameError on early cost ceiling hit
 
     # 1. RECALL
+    _progress("[1/6] Recalling learnings...", verbose, progress)
     learnings = recall(tags)
     learnings_text = format_learnings(learnings)
     if verbose and learnings:
@@ -579,10 +649,21 @@ async def run(task: str, tags: list[str] | None = None,
             print(f"[loop {loop+1}/{max_loops}]", file=sys.stderr)
 
         # 2. DECOMPOSE
+        _progress(f"[2/6] Decomposing task...", verbose, progress)
+        hook_ctx = {"task": task, "learnings_text": learnings_text, "loop": loop,
+                     "tags": tags, "cwd": cwd, "tools": tools, "tools_rw": tools_rw}
+        overrides = await run_hooks("pre_decompose", hook_ctx)
+        task = overrides.get("task", task)
+        learnings_text = overrides.get("learnings_text", learnings_text)
+
         if verbose:
             print(f"\n[decompose] Breaking task into atomic steps...", file=sys.stderr)
         steps, decompose_cost = await decompose(task, learnings_text, verbose=verbose, timeout=timeout)
         total_cost += decompose_cost
+
+        overrides = await run_hooks("post_decompose", {"steps": steps, "task": task, "loop": loop})
+        steps = overrides.get("steps", steps)
+
         if verbose:
             print(f"[decompose] {len(steps)} steps:", file=sys.stderr)
             for i, s in enumerate(steps):
@@ -594,8 +675,10 @@ async def run(task: str, tags: list[str] | None = None,
             base_context += f"\n\n{learnings_text}"
 
         # 3. VOTE each step
+        _progress(f"[3/6] Voting on {len(steps)} steps...", verbose, progress)
         step_results = []
         for i, step in enumerate(steps):
+            _progress(f"  Step {i+1}/{len(steps)}", verbose, progress)
             if verbose:
                 print(f"\n[step {i+1}/{len(steps)}] Voting on: {step[:80]}...", file=sys.stderr)
 
@@ -606,9 +689,21 @@ async def run(task: str, tags: list[str] | None = None,
                                   for r in step_results)
                 context += f"\n\nPrior step results:\n{prior}"
 
+            overrides = await run_hooks("pre_vote", {"step": step, "step_num": i + 1,
+                                                       "total_steps": len(steps), "context": context,
+                                                       "worker_model": worker_model})
+            step = overrides.get("step", step)
+            step_worker_model = overrides.get("worker_model", worker_model)
+
             result = await vote_step(step, i + 1, len(steps), context,
                                     verbose=verbose, tools=tools, tools_rw=tools_rw, cwd=cwd,
-                                    worker_model=worker_model, timeout=timeout, k_ahead=k_ahead)
+                                    worker_model=step_worker_model, timeout=timeout, k_ahead=k_ahead)
+
+            overrides = await run_hooks("post_vote", {"step": step, "step_num": i + 1,
+                                                       "result": result})
+            if "result" in overrides:
+                result = overrides["result"]
+
             step_results.append(result)
             total_cost += result.get("cost", 0)
 
@@ -632,12 +727,21 @@ async def run(task: str, tags: list[str] | None = None,
                     print(f"  - {reason}: {count}x", file=sys.stderr)
 
         # 4. COMPOSE
+        _progress("[4/6] Composing answer...", verbose, progress)
         if verbose:
             print(f"\n[compose] Merging step results...", file=sys.stderr)
         answer, compose_cost = await compose(task, step_results, verbose=verbose, timeout=timeout)
         total_cost += compose_cost
 
+        overrides = await run_hooks("post_compose", {"answer": answer, "task": task,
+                                                       "step_results": step_results})
+        answer = overrides.get("answer", answer)
+
         # 5. VERIFY
+        _progress("[5/6] Verifying answer...", verbose, progress)
+        overrides = await run_hooks("pre_verify", {"answer": answer, "task": task, "loop": loop})
+        answer = overrides.get("answer", answer)
+
         if verbose:
             print(f"\n[verify] Checking answer against original task...", file=sys.stderr)
         verification = await verify(task, answer, verbose=verbose, timeout=timeout)
@@ -649,10 +753,19 @@ async def run(task: str, tags: list[str] | None = None,
             if verification["issues"] and verification["issues"].lower() != "none":
                 print(f"[verify] Issues: {verification['issues'][:200]}", file=sys.stderr)
 
+        overrides = await run_hooks("post_verify", {"verification": verification,
+                                                       "answer": answer, "task": task, "loop": loop})
+        if "verification" in overrides:
+            verification = overrides["verification"]
+
         # 6. LEARN — extract from verification output
+        _progress("[6/6] Extracting learnings...", verbose, progress)
         new_learnings = learn(verification["raw"], tags)
         if verbose and new_learnings:
             print(f"[learn] Extracted {len(new_learnings)} learnings", file=sys.stderr)
+
+        await run_hooks("post_learn", {"learnings": new_learnings, "verification": verification,
+                                        "task": task, "loop": loop})
 
         # Check if we passed
         if verification["passed"]:
@@ -661,6 +774,9 @@ async def run(task: str, tags: list[str] | None = None,
                 total_cost_display = round(total_cost, 3)
                 print(f"\n[done] PASSED on loop {loop+1}, {elapsed}s, ${total_cost_display} total", file=sys.stderr)
                 print(f"[sessions] Resumable sessions saved to: python swarm.py --sessions", file=sys.stderr)
+
+            await run_hooks("post_loop", {"answer": answer, "cost": total_cost, "passed": True,
+                                           "loop": loop + 1, "elapsed": elapsed, "task": task})
             return {"answer": answer, "cost": total_cost}
 
         # Failed — feed issues back as learnings for next loop
@@ -672,10 +788,13 @@ async def run(task: str, tags: list[str] | None = None,
         learnings_text = format_learnings(learnings)
 
     # Exhausted all loops — return best effort
+    elapsed = round(time.monotonic() - t0, 2)
     if verbose:
-        elapsed = round(time.monotonic() - t0, 2)
         total_cost_display = round(total_cost, 3)
         print(f"\n[done] Exhausted {max_loops} loops. Returning best effort. {elapsed}s, ${total_cost_display} total", file=sys.stderr)
+
+    await run_hooks("post_loop", {"answer": answer, "cost": total_cost, "passed": False,
+                                   "loop": max_loops, "elapsed": elapsed, "task": task})
     return {"answer": answer, "cost": total_cost}
 
 
@@ -684,7 +803,7 @@ async def run(task: str, tags: list[str] | None = None,
 async def _run_opinion(task: str, tags: list[str] | None = None,
                        num_workers: int = 3, verbose: bool = False,
                        tools: bool = False, tools_rw: bool = False, cwd: str | None = None,
-                       worker_model: str = "haiku") -> tuple[str, float]:
+                       worker_model: str = "haiku") -> dict:
     """v1 mode: parallel diverse opinions + consensus/judge. Returns (answer, total_cost)."""
     t0 = time.monotonic()
     learnings = recall(tags)
@@ -777,10 +896,15 @@ def main():
                    help="Working directory for workers (default: current dir)")
     p.add_argument("--stdin", action="store_true", help="Read prompt from stdin")
     p.add_argument("-v", "--verbose", action="store_true", help="Print detailed progress")
+    p.add_argument("--quiet", action="store_true", help="Suppress progress output (default: show progress in TTY)")
     p.add_argument("--json", action="store_true", help="Output as JSON")
     p.add_argument("--resume", nargs="?", const="BEST", metavar="SESSION_ID",
                    help="Resume a worker session (default: best from last run)")
     p.add_argument("--sessions", action="store_true", help="List resumable sessions")
+    p.add_argument("--recall", action="store_true",
+                   help="Output past learnings (for injection into other systems)")
+    p.add_argument("--recall-limit", type=int, default=10,
+                   help="Max learnings to recall (default: 10)")
     p.add_argument("--max-cost", type=float, default=1.00,
                    help="Max total cost in USD before stopping. Default: $1.00")
     args = p.parse_args()
@@ -790,6 +914,17 @@ def main():
         print("⚠️  WARNING: --tools-rw enables parallel workers to EDIT and WRITE files. "
               "Risk of data corruption if multiple workers write to same files simultaneously.",
               file=sys.stderr)
+
+    # Recall mode — output learnings for injection into other systems
+    if args.recall:
+        tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
+        learnings = recall(tags, limit=args.recall_limit)
+        if args.json:
+            print(json.dumps([l for l in learnings]))
+        else:
+            text = format_learnings(learnings)
+            print(text if text else "No learnings found.")
+        return
 
     # Sessions mode
     if args.sessions:
@@ -833,10 +968,17 @@ def main():
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
 
     cwd = args.cwd or os.getcwd()
-    result = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
-                             tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers,
-                             worker_model=args.worker_model, max_cost=args.max_cost,
-                             timeout=args.timeout, k_ahead=args.k_ahead, max_loops=args.max_loops))
+    # Auto-enable progress for TTY unless --quiet or --json
+    show_progress = (not args.quiet and not args.json and sys.stderr.isatty()) or args.verbose
+    try:
+        result = asyncio.run(run(prompt, tags=tags, verbose=args.verbose, mode=args.mode,
+                                 tools=args.tools, tools_rw=args.tools_rw, cwd=cwd, workers=args.workers,
+                                 worker_model=args.worker_model, max_cost=args.max_cost,
+                                 timeout=args.timeout, k_ahead=args.k_ahead, max_loops=args.max_loops,
+                                 progress=show_progress))
+    except KeyboardInterrupt:
+        print("\n[interrupted] Shutting down...", file=sys.stderr)
+        sys.exit(130)
 
     # Handle both string and dict returns
     if isinstance(result, dict):

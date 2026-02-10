@@ -51,6 +51,12 @@ Sonnet decomposes → Haiku workers vote each step (K-ahead) → Sonnet composes
 | `-v` | Verbose progress output |
 | `-k N` | Votes ahead to win (default: 3) |
 | `-t N` | Timeout per agent call in seconds (default: 120) |
+| `--worker-model MODEL` | Model for workers: haiku (default) or sonnet |
+| `--max-cost N` | Max total cost in USD before stopping (default: 1.00) |
+| `--max-loops N` | Max verify-replan loops (default: 3) |
+| `--json` | Output result as JSON |
+| `--resume [ID]` | Resume a worker session (default: best from last run) |
+| `--sessions` | List resumable sessions |
 
 ## Memory
 
@@ -96,8 +102,36 @@ This gives 15-25% quality improvement vs temperature variation (~2%). The prompt
 5. **Memory compounds** — one agent with learnings beats 10 without
 6. **Diversity via roles, not temperature**
 
-## Requirements
+## Installation
 
+```bash
+git clone https://github.com/yourname/swarm.git
+cd swarm
+```
+
+Requirements:
 - Python 3.10+
-- Claude Code CLI (`claude` command)
+- [Claude Code CLI](https://claude.ai/claude-code) (`claude` command must be in PATH)
 - No pip dependencies
+
+## Data Storage
+
+All data is stored in `~/.swarm/`:
+- `learnings.jsonl` — Accumulated learnings (append-only JSONL)
+- `sessions.jsonl` — Resumable worker sessions
+
+This directory is created automatically on first run.
+
+## MAKER Paper Adaptation
+
+This is a **MAKER-inspired** system adapted for open-ended reasoning tasks. Key differences from the original paper:
+
+- **Agreement checking**: Uses LLM-based semantic consensus instead of exact string matching (necessary because open-ended tasks have no deterministic ground truth)
+- **Verification**: Sonnet verifier + retry loop instead of rule-based correctness checking
+- **Decomposition**: Tasks are broken into reasoning steps, not mechanical moves
+
+The core principles (decompose, vote with K-ahead, red-flag, learn) are preserved. See [the paper](https://arxiv.org/abs/2511.09030) for the original formulation.
+
+## License
+
+MIT

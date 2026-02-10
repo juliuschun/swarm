@@ -47,7 +47,7 @@ python3 swarm.py --tags coding,python "Write a rate limiter" -v
 # Resume best worker from last run
 python3 swarm.py --resume
 
-# Resume specific session
+# Resume specific session with follow-up
 python3 swarm.py --resume <session_id> "Now add refresh tokens"
 
 # List all resumable sessions
@@ -72,6 +72,51 @@ cat spec.md | python3 swarm.py --stdin -v
 4. **Separate planning from execution** — Sonnet plans, Haiku executes. Different models for different jobs.
 5. **Memory compounds** — A single agent with learnings beats 10 amnesiac agents
 6. **Diversity via roles, not temperature** — Pragmatist/skeptic/innovator roles give 15-25% quality improvement vs temperature variation
+
+## MAKER Paper Adaptation (~70% Fidelity)
+
+This is a MAKER-inspired approach adapted for open-ended reasoning tasks, not strict MAKER-at-scale.
+
+**Preserved from paper**: Decomposition, K-ahead voting, red-flagging, model specialization, learning loop.
+
+**Adapted by necessity**: Uses LLM-based fuzzy consensus instead of exact string matching because open-ended tasks (design, code, writing) lack deterministic ground truth. The paper's tasks (Towers of Hanoi) had verifiable correct answers.
+
+**Implication**: The mathematical guarantee (P(correct) = 1/(1+((1-p)/p)^k)) is approximate, not exact. Reliability still compounds through voting + role diversity + learning, but without formal proof.
+
+## Integration with swarm-team Go CLI
+
+swarm.py can be called from the Go CLI for two purposes:
+
+### 1. Inject learnings into lead prompts
+```bash
+# Get learnings as text (inject into lead assignment)
+LEARNINGS=$(python3 swarm.py --recall --tags coding)
+swarm lead spawn my-lead $SESSION_DIR -a "Do X. $LEARNINGS"
+
+# Get learnings as JSON (parse in Go)
+python3 swarm.py --recall --tags coding --json
+```
+
+### 2. Decision consensus before committing
+```bash
+# Quick opinion poll before a lead commits to an approach
+python3 swarm.py --mode opinion --json "JWT vs sessions for this project?"
+```
+
+### 3. Hook into lead workflow
+Register hooks in Python to trigger swarm-team actions:
+```python
+from swarm import register_hook
+
+async def notify_lead(ctx):
+    # Write result to lead's result.json after MAKER loop completes
+    import json
+    with open(f"{ctx['cwd']}/result.json", "w") as f:
+        json.dump({"answer": ctx["answer"], "cost": ctx["cost"]}, f)
+    return {}
+
+register_hook("post_loop", notify_lead)
+```
 
 ## Dependencies
 
