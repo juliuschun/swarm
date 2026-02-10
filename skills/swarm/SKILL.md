@@ -1,84 +1,111 @@
 ---
 name: swarm
-description: Second opinion machine for high-stakes decisions. Use when mistakes are expensive (auth, payments, migrations, security, architecture) or when the user wants trade-off analysis. Do NOT use for routine implementation, styling, naming, or tasks where compiler/tests give instant feedback.
+description: Three expert perspectives on your hardest questions. Use when mistakes are expensive.
 user-invocable: true
-allowed-tools: Bash
+allowed-tools: Task, Read, Write, Glob, Grep
 argument-hint: "your question or task"
 ---
 
-# Swarm — Verification Where Mistakes Are Expensive
+# Swarm — Three Experts, One Answer
 
-A multi-agent voting system. NOT for everything — only when the cost of being wrong exceeds the cost of asking.
+Spawn three agents with different perspectives. Check if they agree. Synthesize the best answer when they dont.
 
-## When to use this skill
+## When to use
 
-**USE swarm when:**
-- Auth, payment, crypto, security decisions (blind spots = breaches)
-- Architecture choices that are hard to reverse (DB schema, API contracts, framework picks)
-- Trade-off analysis where diverse perspectives matter (JWT vs sessions, REST vs GraphQL)
-- Code review for security-critical paths
-- Debugging non-deterministic production issues
-- The user says "ask the swarm", "get consensus", "what do multiple agents think"
+- Architecture decisions that are hard to reverse
+- Security reviews where blind spots mean breaches
+- Trade-off analysis (JWT vs sessions, REST vs GraphQL, monolith vs microservices)
+- Debugging non-deterministic issues from multiple angles
+- User says "ask the swarm", "get opinions", "what do multiple agents think"
 
-**DO NOT use swarm when:**
-- Routine implementation (just write the code)
-- CSS, naming, formatting, boilerplate (instant feedback via compiler/UI)
-- Tasks with clear docs to follow (just follow the docs)
-- Creative work needing coherent vision (voting averages taste into mediocrity)
-- Simple factual questions (just answer them)
+## When NOT to use
 
-**Rule of thumb:** If the cost of being wrong > 10x the cost of voting, swarm it. Otherwise, solo.
+- Routine implementation. Just write the code.
+- Tasks with clear specs. Just follow them.
+- Simple factual questions. Just answer.
+- Creative work that needs a single coherent vision.
 
-## Pick the right mode
+## How it works
 
-**Opinion mode** — fast, 3 parallel agents + consensus. For trade-off questions:
-```bash
-uv run swarm --mode opinion "$ARGUMENTS" -v
+### Step 1: Recall learnings
+
+Read `~/.swarm/learnings.jsonl` if it exists. Each line is JSON with `{id, category, content, confidence, times_confirmed, active}`. Sort by `times_confirmed` descending, take top 5 active entries. Format them as context for the agents.
+
+### Step 2: Spawn 3 agents in parallel
+
+Use the Task tool to spawn 3 agents simultaneously. Each gets the same question but a different perspective. All three run at the same time.
+
+**Agent 1 — Pragmatist**
+```
+You are a pragmatist. Find the simplest working solution. Cut through complexity. What's the most practical path that actually ships?
+
+QUESTION: $ARGUMENTS
+
+[Include any recalled learnings here]
+
+Give a thorough, actionable answer. At the end, rate your confidence: CONFIDENCE: X/10
 ```
 
-**MAKER mode** — decompose, vote each step, compose, verify. For tasks where correctness matters:
-```bash
-uv run swarm --mode maker "$ARGUMENTS" -v
+**Agent 2 — Skeptic**
+```
+You are a skeptic. Find what could go wrong. Identify edge cases, failure modes, and assumptions that might not hold. What is everyone else missing?
+
+QUESTION: $ARGUMENTS
+
+[Include any recalled learnings here]
+
+Give a thorough, actionable answer. At the end, rate your confidence: CONFIDENCE: X/10
 ```
 
-## Mode selection guide
-
-| Task type | Mode | Why |
-|---|---|---|
-| "X vs Y?" trade-off | opinion | Fast, surfaces perspectives |
-| "Is this secure?" review | maker + --tools | Decompose into checks, vote each |
-| "Design the schema for..." | opinion | Architecture needs perspectives, not steps |
-| "Implement X per spec" | maker + --tools | Step-by-step with verification |
-| "What's wrong with this code?" | maker + --tools | Multiple investigative angles |
-
-## Flags
-
-- `--tools` — workers can read code (Read, Glob, Grep, Bash)
-- `--tools-rw` — workers can edit files (use with caution)
-- `--json` — JSON output for piping
-- `--tags tag1,tag2` — memory tags for recall/learn
-- `--worker-model sonnet` — upgrade workers for harder tasks (default: haiku)
-- `--max-cost 0.50` — cost ceiling in USD
-
-## Examples
-
-```bash
-# Security review (high stakes, use swarm)
-uv run swarm --mode maker --tools "Review auth flow in src/auth/ for vulnerabilities" -v
-
-# Architecture trade-off (need perspectives)
-uv run swarm --mode opinion "Microservices vs monolith for a 3-person team?" -v
-
-# Hard debugging (multiple investigative angles)
-uv run swarm --mode maker --tools "Why does the webhook handler fail silently in production?" -v
-
-# Get past learnings
-uv run swarm --recall --tags security
+**Agent 3 — Systems Thinker**
 ```
+You are a systems thinker. Consider second-order effects, feedback loops, and long-term consequences. What happens six months from now if we go this route?
+
+QUESTION: $ARGUMENTS
+
+[Include any recalled learnings here]
+
+Give a thorough, actionable answer. At the end, rate your confidence: CONFIDENCE: X/10
+```
+
+Use `subagent_type: "general-purpose"` for all three. Launch all 3 in a single message (parallel).
+
+### Step 3: Check consensus
+
+Read all 3 responses. Do they substantially agree on the key recommendations?
+
+- **If they agree**: Merge into one answer, keeping each perspective's best insight. Agreement means high confidence.
+- **If they disagree**: Synthesize. Note where they differ and why. A minority insight that others missed can be the most valuable part of the whole response.
+
+### Step 4: Present the result
+
+Show the user a single synthesized answer. Structure it as:
+
+1. **Answer** — the synthesized recommendation
+2. **Where they agreed** — high-confidence points all three landed on
+3. **Where they differed** — trade-offs, tensions, minority insights worth paying attention to
+4. **Confidence** — overall confidence based on how much they aligned
+
+### Step 5: Save learnings
+
+If the answer contains a reusable insight, append to `~/.swarm/learnings.jsonl`:
+
+```json
+{"id":"<random-12-hex>","ts":"<ISO-8601>","category":"strategy","tags":[],"content":"<the insight>","confidence":0.7,"times_confirmed":0,"active":true}
+```
+
+Categories: `mistake`, `strategy`, `pattern`, `constraint`.
+
+Only save genuine insights, not the full answer. One learning per run is plenty. If nothing is worth saving, dont save anything.
+
+## Scaling up
+
+- For harder questions, spawn 5 agents instead of 3. Add an **Innovator** (unconventional approaches nobody else would try) and a **Contrarian** (argues against the obvious choice to stress-test it).
+- For code questions, use `subagent_type: "general-purpose"` so agents can read files and explore the codebase.
 
 ## Important
 
-- Always run from the project root (where pyproject.toml is)
-- The `uv run` command auto-installs on first use — no setup needed
-- Show the user the final answer, not the raw command output
-- Present swarm results as "here's what multiple agents concluded" — not as absolute truth
+- Present results as "heres what multiple experts concluded." Not absolute truth.
+- The value is in the diversity. Not in any single agent's answer.
+- If all agents agree easily, the question probably didnt need swarm.
+- Disagreements are features. Highlight them.

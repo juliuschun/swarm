@@ -1,149 +1,74 @@
-# Learnings
+# Research
 
-## Paper: "Solving a Million-Step LLM Task with Zero Errors"
-**Meyerson, E. et al. (2025), arXiv:2511.09030**
+## The problem with asking one person
 
----
+You ask someone a question and you get their answer. Shaped by what they know, what they've seen, what they havent seen. Might be great. You wont know what it missed until something breaks.
 
-### The Problem
+This isnt a new observation. Code reviews, architecture boards, medical tumor boards, scientific peer review. They all exist for the same reason: multiple independent perspectives catch stuff any single expert misses. The question was whether AI agents work the same way.
 
-An LLM with 99% per-step accuracy across 1,000,000 steps: `0.99^1,000,000 ≈ 0`. Guaranteed failure. Errors compound — every long-horizon LLM task eventually collapses.
+They do.
 
-### The Solution: MAKER
+## The paper that started this
 
-**M**aximal **A**gentic decomposition, First-to-ahead-by-**K** **E**rror correction, **R**ed-flagging.
+### MAKER: Zero errors at one million steps
 
-Three pillars. That's it.
+**"Solving a Million-Step LLM Task with Zero Errors"** — Meyerson et al., 2025 ([arXiv:2511.09030](https://arxiv.org/abs/2511.09030))
 
----
+Heres the core math problem. An LLM with 99% per-step accuracy across 1,000,000 steps: `0.99^1,000,000 ≈ 0`. Effectively zero chance of getting everything right. Errors compound and every long-horizon task eventually collapses.
 
-### Core Insight #1: Maximal Decomposition
+MAKER solved it with three things:
 
-Break the task into the **smallest possible atomic subtasks**. Each micro-agent handles ONE decision. Not "solve the problem" — "make this ONE move."
+**Decomposition.** Break the task into the smallest possible atomic steps. Each agent handles one decision. Not "solve the problem." One move. Thats it.
 
-They solved 20-disk Towers of Hanoi: **1,048,575 sequential dependent moves, zero errors.**
+**Diverse voting.** Multiple agents try each step independently. Keep sampling until one answer leads by K votes. Not simple majority. An adaptive stopping rule that keeps going until consensus is decisive.
 
-The key: they gave the algorithm/strategy upfront in the prompt. The agent's job isn't to figure out the strategy — it's to execute one step of a known strategy correctly. **Separate planning from execution.**
+**Red-flagging.** Some structural signals predict errors before you even check correctness. Responses that are too long, too short, or dont match expected formats get thrown out. Dont fix them. Discard and resample.
 
-### Core Insight #2: First-to-ahead-by-K Voting
+Result: 20-disk Towers of Hanoi. 1,048,575 sequential dependent moves. Zero errors. Cost scales log-linearly, not exponentially.
 
-At each step, multiple agents attempt the same micro-task. Sampling continues until one answer gets **K more votes than any other answer**.
+### The surprising finding about model size
 
-- **K = 3** was sufficient for 1M+ steps
-- Most steps converge in ~3 rounds
-- Worst case observed: 18 rounds (handled gracefully)
+Smaller cheaper models with voting beat expensive models going solo. GPT-4.1-mini at $3.5K total outperformed larger models on reliability-per-dollar. The reliability came from the process, not from the model being smarter.
 
-The math:
-```
-P(correct selection) = 1 / (1 + ((1-p)/p)^k)
-```
+That stuck with us. Reliability isnt a property of the model. Its a property of the process around it.
 
-Cost scales **log-linearly**: `Θ(s ln s)` — not exponentially. You can spend proportionally more to get exponentially more reliability.
+## What we learned when we actually built it
 
-**This is NOT simple majority voting.** It's an adaptive stopping rule — you keep sampling until consensus is decisive, not until you hit a fixed N.
+We implemented the full pipeline in Python. Decompose, vote per step with escalating K, Opus judge picking the best response, compose everything together, verify, learn, loop. It worked for deterministic stuff.
 
-### Core Insight #3: Red-Flagging
+But for the questions we actually cared about — architecture calls, security reviews, trade-off analysis — the pipeline produced the same quality as asking Opus once. At 28x the latency.
 
-Certain structural signals predict errors BEFORE you check correctness:
-- **Overly long responses**: Error rates jump from ~0.1% to ~10% beyond 700 tokens
-- **Format violations**: Responses not matching expected output patterns
+Why? MAKER was designed for problems where correctness is binary. Did you move the right disk? Yes or no. Open-ended reasoning doesnt have that. You cant vote on "the right architecture" like you vote on "the right chess move."
 
-When red-flagged: **discard and resample**. Don't try to fix. Don't include in voting. Throw it away.
+### What actually worked: the perspectives
 
-This reduced correlated errors (where multiple voters are wrong in the same way) from dozens to near-theoretical minimum.
+The thing that consistently added value was having different agents look at the same problem from different angles. A pragmatist, a skeptic, and a systems thinker dont agree because they're optimizing for different things. Thats the point.
 
----
+This maps to stuff thats worked for decades in other fields:
 
-### The Numbers
+**Delphi Method** — RAND Corporation, 1950s. Get structured independent responses from diverse experts across multiple rounds. No groupthink. Everyone sees the same question but answers from their own expertise.
 
-| Metric | Value |
-|--------|-------|
-| Task | 20-disk Towers of Hanoi |
-| Total steps | 1,048,575 (2^20 - 1) |
-| Errors | **0** |
-| K (voting threshold) | 3 |
-| Best model | GPT-4.1-mini (0.22% per-step error, ~$3.5K) |
-| Required K growth | Θ(ln s) — logarithmic in step count |
-| Cost growth | Θ(s ln s) — log-linear |
+**Tumor boards in oncology** — A surgeon, radiologist, oncologist, and pathologist review the same case. The chair weighs all opinions and makes the call. One brilliant insight from a single specialist can override the majority. Thats exactly how synthesis works in swarm.
 
-**Counter-intuitive finding**: Smaller, non-reasoning models gave the best reliability-per-dollar. Cheap models + voting > expensive models solo.
+**Toyota A3 problem solving** — You cant solve a problem you havent broken down. The discipline of decomposition forces clarity. We kept this principle even after dropping the voting pipeline.
 
-### The Formula
+**Kaizen** — Small improvements over time compound into something big. An agent with 30 confirmed learnings from past runs does genuinely better work than ten fresh agents. We see this every time.
 
-Minimum K for target success probability `t` over `s` steps:
-```
-k_min = ⌈ln(t^(-1/s) - 1) / ln((1-p)/p)⌉
-```
+### What we dropped and why
 
-For `p = 0.99`, `s = 100`, `t = 0.95`: **k = 2** is enough.
-For `p = 0.99`, `s = 1,000,000`, `t = 0.95`: **k = 3** is enough.
+- **The voting pipeline.** Overhead without measurable quality gain for open-ended reasoning.
+- **Deterministic verification.** Cant verify "good architecture" the way you verify "correct disk move."
+- **Escalating K.** Built for million-step reliability. We're doing 3-agent parallel opinions, not million-step chains.
+- **Checkpointing and crash recovery.** A 3-agent parallel spawn takes seconds. It doesnt crash mid-run.
 
-K grows with ln(s). This is why it's practical.
+## The principle underneath all of it
 
----
+For deterministic tasks with a clear right answer, use voting and verification. MAKER nailed that.
 
-## Applied to Our Swarm (v3 — judge-based architecture)
+For open-ended reasoning where judgment matters, use diverse perspectives and synthesis. Thats what swarm does.
 
-### What we implemented from MAKER:
+Both work because they break the same failure mode: one perspective, one set of blind spots, one way to be wrong. Whether you fix it through voting or through synthesis, the mechanism is different but the principle is identical.
 
-1. **Decompose → Vote → Judge → Compose → Verify → Learn loop**
-   - Opus decomposes task into atomic steps
-   - Sonnet workers generate diverse responses per step
-   - Opus judge picks the best response (majority alignment = signal, not law)
-   - Opus composes results and verifies
-   - Learnings feed back if verification fails
+## One takeaway
 
-2. **Red-flagging before judging**
-   - Discard: empty, too long (>3000 chars), low confidence (<3/10), errors
-   - Reduces correlated failures without extra cost
-
-3. **Escalating K (not fixed)**
-   - Start with K=2 workers, escalate to K=3, then K=5 if judge wants more
-   - Easy steps converge at K=2 (fast). Hard steps get more samples (reliable)
-   - No classifier needed — judge naturally drives escalation
-
-4. **Separate planning from execution**
-   - Opus plans (decompose) + judges + verifies
-   - Sonnet executes (vote steps)
-
-### What we evolved beyond the paper:
-
-5. **Judge replaces consensus**
-   - Paper: exact string match for Hanoi moves
-   - Us: Opus judge evaluates quality and picks best response
-   - Stronger than fuzzy consensus — judge can pick a brilliant minority answer
-
-6. **Per-step verification**
-   - Paper: verified after every move (deterministic)
-   - Us: Opus verifies each step immediately, retries with feedback if failed
-   - Errors caught before cascading — not after all steps complete
-
-7. **State compression + checkpointing**
-   - Older steps compressed into summaries, last 5 kept in full
-   - Checkpoint every 10 steps for crash recovery
-   - Enables 100+ step runs without context overflow
-
----
-
-## Empirical Findings from Our Testing
-
-### N=3 vs N=6 workers (opinion mode, pre-MAKER)
-
-| Question type | N=3 | N=6 | Winner |
-|---------------|-----|-----|--------|
-| Convergent ("what makes software reliable?") | Consensus, 21s | Consensus, 20s | Tie |
-| Divisive ("rewrite vs refactor?") | Consensus, 46s | Consensus, 49s | Tie |
-
-**Finding**: For well-trodden topics, Sonnet has strong priors — even 6 diverse roles converge on the same answer. Extra workers don't help when the model already "knows" the answer.
-
-**When more workers help**: Novel/ambiguous problems, code-level decisions requiring tool use, creative tasks needing surface area.
-
-### Roles > Temperature
-
-Using distinct roles (pragmatist, skeptic, innovator, systems thinker, historian, contrarian) produces 15-25% quality improvement vs temperature variation alone. Mode collapse is the #1 killer of ensemble methods.
-
----
-
-## One-Line Takeaway
-
-> Reliability is not a property of the model — it's a property of the process. Small models + decomposition + adaptive voting + red-flagging = zero errors at million-step scale.
+Three experts disagreeing teaches you more than one expert being thorough.
