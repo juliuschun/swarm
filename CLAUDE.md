@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A Python package (`swarm/`) that uses Claude Code agents as workers in a MAKER-inspired loop:
+A Python package (`src/swarm/`) that uses Claude Code agents as workers in a MAKER-inspired loop:
 
 ```
 RECALL → DECOMPOSE → VOTE each step (adaptive, ahead-by-K) → COMPOSE → VERIFY → LEARN
@@ -17,9 +17,9 @@ Based on: "Solving a Million-Step LLM Task with Zero Errors" (Meyerson et al., 2
 ### Package Structure
 
 ```
-swarm/
+src/swarm/
 ├── __init__.py   # Public API exports
-├── __main__.py   # python -m swarm support
+├── __main__.py   # uv run swarm support
 ├── config.py     # Constants, models, roles
 ├── hooks.py      # register_hook, run_hooks
 ├── memory.py     # recall, learn, format_learnings, sessions
@@ -51,25 +51,25 @@ swarm/
 
 ```bash
 # MAKER mode (default) — for tasks that need reliability
-python -m swarm "Design an auth system with JWT" -v
+uv run swarm "Design an auth system with JWT" -v
 
 # Opinion mode — for quick questions / brainstorming
-python -m swarm --mode opinion "Best approach for caching?"
+uv run swarm --mode opinion "Best approach for caching?"
 
 # With memory tags
-python -m swarm --tags coding,python "Write a rate limiter" -v
+uv run swarm --tags coding,python "Write a rate limiter" -v
 
 # Resume best worker from last run
-python -m swarm --resume
+uv run swarm --resume
 
 # Resume specific session with follow-up
-python -m swarm --resume <session_id> "Now add refresh tokens"
+uv run swarm --resume <session_id> "Now add refresh tokens"
 
 # List all resumable sessions
-python -m swarm --sessions
+uv run swarm --sessions
 
 # Pipe input
-cat spec.md | python -m swarm --stdin -v
+cat spec.md | uv run swarm --stdin -v
 ```
 
 ## Memory
@@ -105,17 +105,17 @@ swarm.py can be called from the Go CLI for two purposes:
 ### 1. Inject learnings into lead prompts
 ```bash
 # Get learnings as text (inject into lead assignment)
-LEARNINGS=$(python -m swarm --recall --tags coding)
+LEARNINGS=$(uv run swarm --recall --tags coding)
 swarm lead spawn my-lead $SESSION_DIR -a "Do X. $LEARNINGS"
 
 # Get learnings as JSON (parse in Go)
-python -m swarm --recall --tags coding --json
+uv run swarm --recall --tags coding --json
 ```
 
 ### 2. Decision consensus before committing
 ```bash
 # Quick opinion poll before a lead commits to an approach
-python -m swarm --mode opinion --json "JWT vs sessions for this project?"
+uv run swarm --mode opinion --json "JWT vs sessions for this project?"
 ```
 
 ### 3. Hook into lead workflow

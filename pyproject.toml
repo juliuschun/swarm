@@ -9,6 +9,9 @@ readme = "README.md"
 [project.scripts]
 swarm = "swarm.cli:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/swarm"]
+
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"

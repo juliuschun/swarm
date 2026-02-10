@@ -17,23 +17,17 @@ Based on [MAKER](https://arxiv.org/abs/2511.09030) — "Solving a Million-Step L
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
-
 # Design question (opinion mode — fast, 3 parallel agents)
-python -m swarm --mode opinion "JWT vs sessions for auth?" -v
+uv run swarm --mode opinion "JWT vs sessions for auth?" -v
 
 # Coding task (MAKER mode — decompose, vote, verify)
-python -m swarm --mode maker "Add input validation" -v
+uv run swarm --mode maker "Add input validation" -v
 
 # With tool access (workers can read files, search code)
-python -m swarm --mode maker --tools "Read the codebase and add error logging" -v
+uv run swarm --mode maker --tools "Read the codebase and add error logging" -v
 
 # Read-write tools (workers can edit files — use with caution)
-python -m swarm --mode maker --tools-rw "Refactor the red_flag function" -v
-
-# Or use the `swarm` command directly after pip install
-swarm --mode opinion "Best caching strategy?" -v
+uv run swarm --mode maker --tools-rw "Refactor the red_flag function" -v
 ```
 
 ## Two Modes
@@ -113,11 +107,12 @@ This gives 15-25% quality improvement vs temperature variation (~2%). The prompt
 ```bash
 git clone https://github.com/yourname/swarm.git
 cd swarm
-pip install -e .
+# That's it. uv run handles the rest.
 ```
 
 Requirements:
 - Python 3.10+
+- [uv](https://docs.astral.sh/uv/) (`uv run` auto-creates venv + installs on first run)
 - [Claude Code CLI](https://claude.ai/claude-code) (`claude` command must be in PATH)
 - No pip dependencies
 
