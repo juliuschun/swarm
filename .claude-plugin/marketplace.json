@@ -1,17 +1,20 @@
 {
   "name": "swarm-marketplace",
   "owner": {
-    "name": "Julius"
+    "name": "juliuschun"
   },
   "plugins": [
     {
       "name": "swarm",
-      "source": ".",
+      "source": "./",
       "description": "MAKER-informed multi-agent collective intelligence. Parallel diverse agents + adaptive voting for reliable answers.",
       "version": "0.1.0",
       "author": {
-        "name": "Julius"
-      }
+        "name": "juliuschun"
+      },
+      "skills": [
+        "./skills/swarm"
+      ]
     }
   ]
 }
