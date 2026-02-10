@@ -88,10 +88,10 @@ This gives 15-25% quality improvement vs temperature variation (~2%). The prompt
 
 | Role | Model | Why |
 |------|-------|-----|
-| Planner | Sonnet | Intelligence to decompose well |
+| Planner | Opus | Best judgment to decompose well |
 | Worker | Haiku | Cheap — voting makes it reliable |
-| Composer | Sonnet | Coherent synthesis |
-| Verifier | Sonnet | Judgment to catch issues |
+| Composer | Opus | Coherent synthesis |
+| Verifier | Opus | Best judgment to catch issues |
 
 ## Principles
 

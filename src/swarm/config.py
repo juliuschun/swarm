@@ -4,10 +4,10 @@ from pathlib import Path
 
 # Default models (can be overridden by CLI flags)
 DEFAULT_MODELS = {
-    "planner":   "sonnet",   # decomposes tasks into atomic steps
+    "planner":   "opus",     # decomposes tasks — needs best judgment
     "worker":    "haiku",    # executes steps — cheap, voting makes it reliable
-    "composer":  "sonnet",   # merges step results into final answer
-    "verifier":  "sonnet",   # checks result against original task
+    "composer":  "opus",     # merges step results — needs coherent synthesis
+    "verifier":  "opus",     # checks result — needs best judgment to catch issues
 }
 
 MODELS = DEFAULT_MODELS.copy()

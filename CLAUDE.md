@@ -32,10 +32,10 @@ src/swarm/
 ### Models (configurable in config.py)
 | Role | Model | Why |
 |------|-------|-----|
-| Planner (decompose) | Sonnet | Needs intelligence to break tasks well |
+| Planner (decompose) | Opus | Best judgment to break tasks well |
 | Worker (vote steps) | Haiku | Cheap — voting makes it reliable (MAKER insight) |
-| Composer (merge) | Sonnet | Needs to synthesize coherently |
-| Verifier (check) | Sonnet | Needs judgment to catch issues |
+| Composer (merge) | Opus | Best judgment to synthesize coherently |
+| Verifier (check) | Opus | Best judgment to catch issues |
 
 ### Key Parameters
 - `K_AHEAD = 3` — votes ahead needed to win (from MAKER paper: sufficient for 1M+ steps)
