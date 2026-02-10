@@ -104,13 +104,26 @@ This gives 15-25% quality improvement vs temperature variation (~2%). The prompt
 
 ## Installation
 
+### As a Claude Code plugin (recommended)
+
+```bash
+/plugin marketplace add yourname/swarm
+/plugin install swarm
+```
+
+Then use `/swarm "your question"` or just ask Claude to "ask the swarm".
+
+### As a standalone CLI
+
 ```bash
 git clone https://github.com/yourname/swarm.git
 cd swarm
+uv run swarm --help
 # That's it. uv run handles the rest.
 ```
 
-Requirements:
+### Requirements
+
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (`uv run` auto-creates venv + installs on first run)
 - [Claude Code CLI](https://claude.ai/claude-code) (`claude` command must be in PATH)

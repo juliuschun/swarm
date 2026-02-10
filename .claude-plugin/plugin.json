@@ -1,0 +1,13 @@
+{
+  "name": "swarm",
+  "description": "MAKER-informed multi-agent collective intelligence. Parallel diverse agents + adaptive voting for reliable answers.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Julius"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/julius/swarm.git"
+  },
+  "license": "MIT"
+}
