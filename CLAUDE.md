@@ -33,7 +33,7 @@ src/swarm/
 | Role | Model | Why |
 |------|-------|-----|
 | Planner (decompose) | Opus | Best judgment to break tasks well |
-| Worker (vote steps) | Haiku | Cheap — voting makes it reliable (MAKER insight) |
+| Worker (vote steps) | Sonnet | Smarter workers — voting makes them even more reliable |
 | Composer (merge) | Opus | Best judgment to synthesize coherently |
 | Verifier (check) | Opus | Best judgment to catch issues |
 

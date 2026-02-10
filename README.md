@@ -89,7 +89,7 @@ This gives 15-25% quality improvement vs temperature variation (~2%). The prompt
 | Role | Model | Why |
 |------|-------|-----|
 | Planner | Opus | Best judgment to decompose well |
-| Worker | Haiku | Cheap — voting makes it reliable |
+| Worker | Sonnet | Smarter workers — voting makes them even more reliable |
 | Composer | Opus | Coherent synthesis |
 | Verifier | Opus | Best judgment to catch issues |
 

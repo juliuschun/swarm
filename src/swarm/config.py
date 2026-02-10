@@ -5,7 +5,7 @@ from pathlib import Path
 # Default models (can be overridden by CLI flags)
 DEFAULT_MODELS = {
     "planner":   "opus",     # decomposes tasks — needs best judgment
-    "worker":    "haiku",    # executes steps — cheap, voting makes it reliable
+    "worker":    "sonnet",   # executes steps — voting makes it reliable
     "composer":  "opus",     # merges step results — needs coherent synthesis
     "verifier":  "opus",     # checks result — needs best judgment to catch issues
 }
